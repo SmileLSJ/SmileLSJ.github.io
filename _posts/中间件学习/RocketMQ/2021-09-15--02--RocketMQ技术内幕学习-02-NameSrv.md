@@ -32,7 +32,7 @@ tags:
 
 ## 知识点
 
-![RocketMQ技术内幕-02--NameSrv](../../../img/RocketMQ技术内幕-02--NameSrv.png)
+![RocketMQ技术内幕-02--NameSrv](/img/RocketMQ技术内幕-02--NameSrv.png)
 
 
 
@@ -40,7 +40,7 @@ tags:
 
 ### 时序图
 
-![image-20210728160328983](../../../img/image-20210728160328983.png)
+![image-20210728160328983](/img/image-20210728160328983.png)
 
 
 
@@ -354,7 +354,7 @@ tags:
 
 * QueueData：Topic队列数据
 
-  <img src="../../../img/image-20210728163242184.png" alt="image-20210728163242184" style="zoom:50%;" />
+  <img src="/img/image-20210728163242184.png" alt="image-20210728163242184" style="zoom:50%;" />
 
   ```java
   public class QueueData implements Comparable<QueueData> {
@@ -375,11 +375,11 @@ tags:
 
   * 一个topic有多个消息队列，这些消息队列分布在不同的broker上，一个Queuedata对应一个broker上某topic对应读写队列的结构
 
-    <img src="../../../img/image-20210728190403645.png" alt="image-20210728190403645" style="zoom:50%;" />
+    <img src="/img/image-20210728190403645.png" alt="image-20210728190403645" style="zoom:50%;" />
 
 * BrokerData
 
-  <img src="../../../img/image-20210728163326955.png" alt="image-20210728163326955" style="zoom:50%;" />
+  <img src="/img/image-20210728163326955.png" alt="image-20210728163326955" style="zoom:50%;" />
 
   ```java
   public class BrokerData implements Comparable<BrokerData> {
@@ -398,7 +398,7 @@ tags:
 
 * BrokerLiveInfo
 
-  <img src="../../../img/image-20210728163439489.png" alt="image-20210728163439489" style="zoom:50%;" />
+  <img src="/img/image-20210728163439489.png" alt="image-20210728163439489" style="zoom:50%;" />
 
   ```java
   /**
@@ -434,7 +434,7 @@ tags:
 
 * 时序图
 
-  ![RocketMQ--NameSrv--路由注册](../../../../VPProjects/RocketMQ--NameSrv--路由注册.jpg)
+  ![RocketMQ--NameSrv--路由注册](/../VPProjects/RocketMQ--NameSrv--路由注册.jpg)
 
 #### Broker发送心跳包
 
@@ -549,7 +549,7 @@ tags:
 
 * 网络处理器解析请求类型
 
-  ![image-20210728184459240](../../../img/image-20210728184459240.png)
+  ![image-20210728184459240](/img/image-20210728184459240.png)
 
 * 当有请求进来之后，查看processRequest方法
 
@@ -898,7 +898,7 @@ public void scanNotActiveBroker() {
 
   * TopicRouteData
 
-    ![image-20210728200022882](../../../img/image-20210728200022882.png)
+    ![image-20210728200022882](/img/image-20210728200022882.png)
 
     ```java
     /**
@@ -1053,7 +1053,7 @@ public RemotingCommand getRouteInfoByTopic(ChannelHandlerContext ctx,
 
 * 总体流程图
 
-![image-20210728200538275](../../../img/image-20210728200538275.png)
+![image-20210728200538275](/img/image-20210728200538275.png)
 
 
 
