@@ -1,7 +1,6 @@
 ---
 layout:     post
 title:      "BeanCopier"
-subtitle:   "BeanCopier"
 date:       2021-09-01 12:00:00
 author:     "LSJ"
 header-img: "img/post-bg-2015.jpg"
