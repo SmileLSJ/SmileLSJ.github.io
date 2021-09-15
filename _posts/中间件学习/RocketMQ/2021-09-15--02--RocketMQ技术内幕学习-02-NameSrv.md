@@ -1,10 +1,11 @@
 ---
 layout:     post
-title:      "RocketMQ技术内幕学习-针对点-02--ServiceThread"
+title:      "RocketMQ技术内幕学习-02-NameSrv"
 date:       2021-09-01 12:00:00
 author:     "LSJ"
 header-img: "img/post-bg-2015.jpg"
 tags:
+    RocketMQ技术内幕学习
     RocketMQ
     NameServer
 ---
