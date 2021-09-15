@@ -1,0 +1,1395 @@
+## 探究点
+
+1. 消息的格式是什么样子
+2. 消息生产者如何启动
+3. 消息生产者如何发送消息，
+   1. 消息队列如何进行负载
+      1. 遇到Broker不可用，怎么解决
+         1. 容错机制，还有默认的过滤机制
+   2. 消息发送如何保证高可用
+
+
+
+## 知识点
+
+
+
+## RocketMQ消息
+
+* 类图
+
+  <img src="../../../../照片/typora/image-20210729154611796.png" alt="image-20210729154611796" style="zoom:50%;" />
+
+  * Properties：为Message的扩展属性，包括
+    * tag：消息TAG，用于消息过滤
+    * keys：Message索引建，多个用空格隔开，RocketMQ可以根据这些key快速检索到消息
+    * waitStoreMsgOk：消息发送时是否等消息存储完成后再返回
+    * delayTimeLevel：消息延迟级别，用于定时消息或消息重试
+
+
+
+## 启动流程
+
+* 重要对象
+  * MQClientInstance：MQClientlnstance 封装了 RocketMQ 网络处理 API ，是消息生产者（ Producer）、消息消费者Consumer ）与 NameServer、Broker 打交道的网络通道
+    * 那复用一个MQClientInstance会有怎么的结果呢？
+      * 这种情况会出现在你在一个JVM里启动了多个Producer时，且没有设置instanceName和unitName，那么这两个Producer会公用一个MQClientInstance，发送的消息会路由到同一个集群。例如，你起了两个Producer，并且配置的NameServer地址不一样，本意是让这两个Producer往不同集群上分配消息，但是由于共用了一个MQClientInstance，这个MQClientInstance是基于先来的Producer配置构建的，第二个Producer和他公用后被认为是同一instance，配置是相同的，消息的路由就是相同的，就没有达到你想要的效果。实质上就是
+        * 不同网址，通过IP可以区分
+        * 相同网址，通过InstanceName进行区分
+* 时序图
+
+![RocketMQ--消息生产者--启动流程](../../../../VPProjects/RocketMQ--消息生产者--启动流程.jpg)
+
+### 源码
+
+#### DefaultMQProducerImpl
+
+* start
+
+  ```java
+  //主题 -》 推送的基本配置信息
+  private final ConcurrentMap<String/* topic */, TopicPublishInfo> topicPublishInfoTable =
+    new ConcurrentHashMap<String, TopicPublishInfo>();
+  
+  
+  public void start(final boolean startFactory) throws MQClientException {
+    switch (this.serviceState) {
+      case CREATE_JUST:
+        this.serviceState = ServiceState.START_FAILED;
+  
+        //-------------------检查-----------------------
+        this.checkConfig();
+  
+  
+  
+        //------------------获取通讯工具---------------------
+        //1. 检查producer是否是内部的生产者组，如果是，就不更改instanceName，如果不是，改变生产者的instanceName为进行ID
+        // 此处的目的是：如果一个物理机上部署了两个应用程序，那么对于后面的clientId = IP + instanceName就会重复，所以会修改成此应用程序的进行ID编号，避免重复
+        if (!this.defaultMQProducer.getProducerGroup().equals(MixAll.CLIENT_INNER_PRODUCER_GROUP)) {
+  
+          //如果不是内部的生产者组，就更改instanceName为进程ID
+          this.defaultMQProducer.changeInstanceNameToPID();
+        }
+  
+        //2. 创建MQClientInstance实例。整个JVM实例中只存在一个MQClientManager实例，管理器当然是单个的，维护一个MQClientInstance缓存表
+        //  ConcurrentMap<clientId,MQClientInstance> 同一个clientId只会创建一个MQClientInstance
+        this.mQClientFactory = MQClientManager.getInstance().getOrCreateMQClientInstance(this.defaultMQProducer, rpcHook);
+  
+  
+        //3. 向MQClientInstance注册，将当前生产者加入到MQClientInstance管理中。方便后续调用网络请求，进行心跳检测（心跳都是客户端发给NameSrv的，120s就认为挂了）
+        boolean registerOK = mQClientFactory.registerProducer(this.defaultMQProducer.getProducerGroup(), this);
+        if (!registerOK) {
+          this.serviceState = ServiceState.CREATE_JUST;
+          throw new MQClientException("The producer group[" + this.defaultMQProducer.getProducerGroup()
+                                      + "] has been created before, specify another name please." + FAQUrl.suggestTodo(FAQUrl.GROUP_NAME_DUPLICATE_URL),
+                                      null);
+        }
+  
+        this.topicPublishInfoTable.put(this.defaultMQProducer.getCreateTopicKey(), new TopicPublishInfo());
+  
+  
+        //------------------启动通讯工具----------------
+        if (startFactory) {
+          //4. 启动
+          mQClientFactory.start();
+        }
+  
+        log.info("the producer [{}] start OK. sendMessageWithVIPChannel={}", this.defaultMQProducer.getProducerGroup(),
+                 this.defaultMQProducer.isSendMessageWithVIPChannel());
+        this.serviceState = ServiceState.RUNNING;
+        break;
+      case RUNNING:
+      case START_FAILED:
+      case SHUTDOWN_ALREADY:
+        throw new MQClientException("The producer service state not OK, maybe started once, "
+                                    + this.serviceState
+                                    + FAQUrl.suggestTodo(FAQUrl.CLIENT_SERVICE_NOT_OK),
+                                    null);
+      default:
+        break;
+    }
+  
+    this.mQClientFactory.sendHeartbeatToAllBrokerWithLock();
+  
+    this.timer.scheduleAtFixedRate(new TimerTask() {
+      @Override
+      public void run() {
+        try {
+          RequestFutureTable.scanExpiredRequest();
+        } catch (Throwable e) {
+          log.error("scan RequestFutureTable exception", e);
+        }
+      }
+    }, 1000 * 3, 1000);
+  }
+  ```
+
+
+#### DefaultMQProducer
+
+##### changeInstanceNameToPID
+
+```java
+public void changeInstanceNameToPID() {
+  if (this.instanceName.equals("DEFAULT")) {
+    this.instanceName = String.valueOf(UtilAll.getPid());
+  }
+}
+```
+
+* UtilAll
+
+  ```java
+  public class UtilAll {
+      private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.COMMON_LOGGER_NAME);
+  
+      public static final String YYYY_MM_DD_HH_MM_SS = "yyyy-MM-dd HH:mm:ss";
+      public static final String YYYY_MM_DD_HH_MM_SS_SSS = "yyyy-MM-dd#HH:mm:ss:SSS";
+      public static final String YYYYMMDDHHMMSS = "yyyyMMddHHmmss";
+      final static char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
+  
+      public static int getPid() {
+          RuntimeMXBean runtime = ManagementFactory.getRuntimeMXBean();
+          String name = runtime.getName(); // format: "pid@hostname"
+          try {
+              return Integer.parseInt(name.substring(0, name.indexOf('@')));
+          } catch (Exception e) {
+              return -1;
+          }
+      }
+  }
+  ```
+
+
+
+#### MQClientManager
+
+##### getOrCreateMQClientInstance
+
+```java
+public MQClientInstance getOrCreateMQClientInstance(final ClientConfig clientConfig, RPCHook rpcHook) {
+
+  //clientIp + instanceName
+  String clientId = clientConfig.buildMQClientId();
+
+  //只要clientId相同，就获取同一个MQClientInstance
+  //MQClientInstance
+  MQClientInstance instance = this.factoryTable.get(clientId);
+  if (null == instance) {
+    
+    //
+    instance =
+      new MQClientInstance(clientConfig.cloneClientConfig(),
+                           this.factoryIndexGenerator.getAndIncrement(), clientId, rpcHook);
+    MQClientInstance prev = this.factoryTable.putIfAbsent(clientId, instance);
+    if (prev != null) {
+      instance = prev;
+      log.warn("Returned Previous MQClientInstance for clientId:[{}]", clientId);
+    } else {
+      log.info("Created new MQClientInstance for clientId:[{}]", clientId);
+    }
+  }
+
+  return instance;
+}
+```
+
+```java
+
+//clientIp@instanceName@unitName
+public String buildMQClientId() {
+  StringBuilder sb = new StringBuilder();
+  sb.append(this.getClientIP());
+
+  sb.append("@");
+  sb.append(this.getInstanceName());
+  if (!UtilAll.isBlank(this.unitName)) {
+    sb.append("@");
+    sb.append(this.unitName);
+  }
+
+  return sb.toString();
+}
+```
+
+
+
+
+
+## 消息发送流程
+
+### 流程图
+
+![RocketMQ--消息生产者--发送消息](../../../../照片/typora/RocketMQ--消息生产者--发送消息.jpg)
+
+具体的方法图片
+
+![Producer发送消息顺序图](../../../../照片/typora/02-0029752.png)
+
+
+
+### 关键对象
+
+#### TopicPublishInfo
+
+* 生产者本地保存的主题的路由信息表
+
+  <img src="../../../../照片/typora/image-20210802151109835.png" alt="image-20210802151109835" style="zoom:50%;" />
+
+  ```java
+  public class TopicPublishInfo {
+      //是否是顺序消息
+      private boolean orderTopic = false;
+  
+  
+      private boolean haveTopicRouterInfo = false;
+  
+      //该主题队列的消息队列，一个MessageQueue对应一个ConsumeQueue
+      private List<MessageQueue> messageQueueList = new ArrayList<MessageQueue>();
+  
+      //每选择一次消息队列，该值会自增1，每个线程的自增器，底层使用ThreadLocal实现
+      private volatile ThreadLocalIndex sendWhichQueue = new ThreadLocalIndex();
+  
+      //主题的路由元信息
+      private TopicRouteData topicRouteData;
+    
+    
+  }  
+  ```
+
+  ```java
+  public class TopicRouteData extends RemotingSerializable {
+  
+      //顺序消息配置内容
+      private String orderTopicConf;
+  
+      //主题所在topic对列元数据
+      private List<QueueData> queueDatas;
+  
+      //主题所在的broker元数据
+      private List<BrokerData> brokerDatas;
+  
+      //broker上过滤服务器地址列表，broker元信息中既然没有路由信息
+      private HashMap<String/* brokerAddr */, List<String>/* Filter Server */> filterServerTable;
+    
+  }  
+  ```
+
+
+
+### 源码--正常发送
+
+#### DefaultMQProducerImpl
+
+##### sendDefaultImpl-->入口
+
+```java
+//生产者发送消息
+private SendResult sendDefaultImpl(
+  Message msg,
+  final CommunicationMode communicationMode,
+  final SendCallback sendCallback,
+  final long timeout
+) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+  this.makeSureStateOK();
+  Validators.checkMessage(msg, this.defaultMQProducer);
+  final long invokeID = random.nextLong();
+  long beginTimestampFirst = System.currentTimeMillis();
+  long beginTimestampPrev = beginTimestampFirst;
+  long endTimestamp = beginTimestampFirst;
+
+
+  //------------------获取路由信息------------------
+  //1. tryToFindTopicPublishInfo ： 查找主题的路由信息的方法
+  TopicPublishInfo topicPublishInfo = this.tryToFindTopicPublishInfo(msg.getTopic());
+
+
+
+  if (topicPublishInfo != null && topicPublishInfo.ok()) {
+    boolean callTimeout = false;
+    MessageQueue mq = null;
+    Exception exception = null;
+    SendResult sendResult = null;
+
+
+    //-------获取最大的重试次数------
+    //设置最大的重试次数，同步的时候，则为最大的重试次数+1，如果是异步，则为1，只发送一次
+    int timesTotal = communicationMode == CommunicationMode.SYNC ? 1 + this.defaultMQProducer.getRetryTimesWhenSendFailed() : 1;
+    int times = 0;
+    String[] brokersSent = new String[timesTotal];
+
+
+    //重试：就是简单的使用循环来执行，Oh my god，内部捕获异常，保证可以下次执行
+    //同步请求进行重试，异步只发送一次
+    for (; times < timesTotal; times++) {
+
+      //第一次获取肯定为null
+      String lastBrokerName = null == mq ? null : mq.getBrokerName();
+
+
+      //------------------选择消息队列------------------
+      //1. 选择将要发送的消息队列信息，会参考Broker发送消息的延迟，Broker故障延迟策略
+      MessageQueue mqSelected = this.selectOneMessageQueue(topicPublishInfo, lastBrokerName);
+
+
+      if (mqSelected != null) {
+        mq = mqSelected;
+        brokersSent[times] = mq.getBrokerName();
+        try {
+          beginTimestampPrev = System.currentTimeMillis();
+          if (times > 0) {
+            //Reset topic with namespace during resend.
+            msg.setTopic(this.defaultMQProducer.withNamespace(msg.getTopic()));
+          }
+
+          //发送消息前的耗时
+          long costTime = beginTimestampPrev - beginTimestampFirst;
+          if (timeout < costTime) {
+            callTimeout = true;
+            break;
+          }
+
+
+          //------------------发送消息------------------
+          //2. 消息发送
+          sendResult = this.sendKernelImpl(msg, mq, communicationMode, sendCallback, topicPublishInfo, timeout - costTime);
+
+          endTimestamp = System.currentTimeMillis();
+
+          //3. 更新Broker可用性信息
+          this.updateFaultItem(mq.getBrokerName(), endTimestamp - beginTimestampPrev, false);
+          switch (communicationMode) {
+            case ASYNC:
+              return null;
+            case ONEWAY:
+              return null;
+            case SYNC:
+              if (sendResult.getSendStatus() != SendStatus.SEND_OK) {
+                if (this.defaultMQProducer.isRetryAnotherBrokerWhenNotStoreOK()) {
+                  continue;
+                }
+              }
+
+              return sendResult;
+            default:
+              break;
+          }
+        } catch (RemotingException e) {
+          endTimestamp = System.currentTimeMillis();
+
+          //增加失败条目，第二个参数：本次消息发送的延迟时间（耗时）
+          //isolation，true表示使用默认时长30s来计算Broker的故障规避时长
+          //           false表示使用本次消息发送延迟时间来计算Broker故障规避时长
+          this.updateFaultItem(mq.getBrokerName(), endTimestamp - beginTimestampPrev, true);
+          log.warn(String.format("sendKernelImpl exception, resend at once, InvokeID: %s, RT: %sms, Broker: %s", invokeID, endTimestamp - beginTimestampPrev, mq), e);
+          log.warn(msg.toString());
+          exception = e;
+          continue;
+        } catch (MQClientException e) {//打印异常，更新Broker可用性信息，更新继续循环
+          endTimestamp = System.currentTimeMillis();
+
+          //增加失败条目
+          this.updateFaultItem(mq.getBrokerName(), endTimestamp - beginTimestampPrev, true);
+          log.warn(String.format("sendKernelImpl exception, resend at once, InvokeID: %s, RT: %sms, Broker: %s", invokeID, endTimestamp - beginTimestampPrev, mq), e);
+          log.warn(msg.toString());
+          exception = e;
+          continue;
+        } catch (MQBrokerException e) {//打印异常，更新Broker可用性信息，更新继续循环
+          endTimestamp = System.currentTimeMillis();
+
+          //增加失败条目
+          this.updateFaultItem(mq.getBrokerName(), endTimestamp - beginTimestampPrev, true);
+          log.warn(String.format("sendKernelImpl exception, resend at once, InvokeID: %s, RT: %sms, Broker: %s", invokeID, endTimestamp - beginTimestampPrev, mq), e);
+          log.warn(msg.toString());
+          exception = e;
+          switch (e.getResponseCode()) {
+            case ResponseCode.TOPIC_NOT_EXIST:
+            case ResponseCode.SERVICE_NOT_AVAILABLE:
+            case ResponseCode.SYSTEM_ERROR:
+            case ResponseCode.NO_PERMISSION:
+            case ResponseCode.NO_BUYER_ID:
+            case ResponseCode.NOT_IN_CURRENT_UNIT:
+              continue;
+            default:
+              if (sendResult != null) {
+                return sendResult;
+              }
+
+              throw e;
+          }
+        } catch (InterruptedException e) {//打印异常，更新Broker可用性信息，部分情况下的异常，直接返回，结束循环
+          endTimestamp = System.currentTimeMillis();
+
+          //增加失败条目
+          this.updateFaultItem(mq.getBrokerName(), endTimestamp - beginTimestampPrev, false);
+          log.warn(String.format("sendKernelImpl exception, throw exception, InvokeID: %s, RT: %sms, Broker: %s", invokeID, endTimestamp - beginTimestampPrev, mq), e);
+          log.warn(msg.toString());
+
+          log.warn("sendKernelImpl exception", e);
+          log.warn(msg.toString());
+          throw e;
+        }
+      } else {
+        break;
+      }
+    }
+
+    if (sendResult != null) {
+      return sendResult;
+    }
+
+    String info = String.format("Send [%d] times, still failed, cost [%d]ms, Topic: %s, BrokersSent: %s",
+                                times,
+                                System.currentTimeMillis() - beginTimestampFirst,
+                                msg.getTopic(),
+                                Arrays.toString(brokersSent));
+
+    info += FAQUrl.suggestTodo(FAQUrl.SEND_MSG_FAILED);
+
+    MQClientException mqClientException = new MQClientException(info, exception);
+    if (callTimeout) {
+      throw new RemotingTooMuchRequestException("sendDefaultImpl call timeout");
+    }
+
+    if (exception instanceof MQBrokerException) {
+      mqClientException.setResponseCode(((MQBrokerException) exception).getResponseCode());
+    } else if (exception instanceof RemotingConnectException) {
+      mqClientException.setResponseCode(ClientErrorCode.CONNECT_BROKER_EXCEPTION);
+    } else if (exception instanceof RemotingTimeoutException) {
+      mqClientException.setResponseCode(ClientErrorCode.ACCESS_BROKER_TIMEOUT);
+    } else if (exception instanceof MQClientException) {
+      mqClientException.setResponseCode(ClientErrorCode.BROKER_NOT_EXIST_EXCEPTION);
+    }
+
+    throw mqClientException;
+  }
+
+  validateNameServerSetting();
+
+  throw new MQClientException("No route info of this topic: " + msg.getTopic() + FAQUrl.suggestTodo(FAQUrl.NO_TOPIC_ROUTE_INFO),
+                              null).setResponseCode(ClientErrorCode.NOT_FOUND_TOPIC_EXCEPTION);
+}
+```
+
+##### tryToFindTopicPublishInfo
+
+```java
+private TopicPublishInfo tryToFindTopicPublishInfo(final String topic) {
+  TopicPublishInfo topicPublishInfo = this.topicPublishInfoTable.get(topic);
+
+  //本地如果没有关于主题的信息，则去NameSrv中获取
+  if (null == topicPublishInfo || !topicPublishInfo.ok()) {
+    this.topicPublishInfoTable.putIfAbsent(topic, new TopicPublishInfo());
+    this.mQClientFactory.updateTopicRouteInfoFromNameServer(topic);
+    topicPublishInfo = this.topicPublishInfoTable.get(topic);
+  }
+
+  //若获取到的 Topic发布信息时候可用，则返回
+  if (topicPublishInfo.isHaveTopicRouterInfo() || topicPublishInfo.ok()) {
+    return topicPublishInfo;
+  } else {
+    //消息生产者更新和维护路由缓存
+    this.mQClientFactory.updateTopicRouteInfoFromNameServer(topic, true, this.defaultMQProducer);
+    topicPublishInfo = this.topicPublishInfoTable.get(topic);
+    return topicPublishInfo;
+  }
+}
+```
+
+* MQClientInstance#updateTopicRouteInfoFromNameServer
+
+  ```java
+  /**
+       * 消息生产者更新和维护路由缓存
+       * 从NameServer获取主题路由信息，并更新
+       * @param topic
+       * @param isDefault
+       * @param defaultMQProducer
+       * @return
+       */
+  public boolean updateTopicRouteInfoFromNameServer(final String topic, boolean isDefault,
+                                                    DefaultMQProducer defaultMQProducer) {
+    try {
+      if (this.lockNamesrv.tryLock(LOCK_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+        try {
+          TopicRouteData topicRouteData;
+  
+  
+          //--------------------------------1. 根据主题去NameSrv中查询路由信息-----------------------------
+          //1. 使用默认主题去查询，如果查询到，则替换路由信息中读写队列个数为消息生产者默认的队列个数
+          if (isDefault && defaultMQProducer != null) {
+            topicRouteData = this.mQClientAPIImpl.getDefaultTopicRouteInfoFromNameServer(defaultMQProducer.getCreateTopicKey(),
+                                                                                         1000 * 3);
+            if (topicRouteData != null) {
+              for (QueueData data : topicRouteData.getQueueDatas()) {
+                int queueNums = Math.min(defaultMQProducer.getDefaultTopicQueueNums(), data.getReadQueueNums());
+                data.setReadQueueNums(queueNums);
+                data.setWriteQueueNums(queueNums);
+              }
+            }
+          } else {// 使用自定义的主题去查询
+            topicRouteData = this.mQClientAPIImpl.getTopicRouteInfoFromNameServer(topic, 1000 * 3);
+          }
+  
+  
+          //--------------------------------2. Topic的路由信息维护-----------------------------
+          if (topicRouteData != null) {
+            TopicRouteData old = this.topicRouteTable.get(topic);
+  
+            //2.1 判断主题的路由信息是否发生改变，对比很简单，都是直接使用里面的数据不同就是需要更新
+            boolean changed = topicRouteDataIsChange(old, topicRouteData);
+            if (!changed) {
+              changed = this.isNeedUpdateTopicRouteInfo(topic);
+            } else {
+              log.info("the topic[{}] route info changed, old[{}] ,new[{}]", topic, old, topicRouteData);
+            }
+  
+            if (changed) {
+              TopicRouteData cloneTopicRouteData = topicRouteData.cloneTopicRouteData();
+  
+              //全部覆盖掉老的BrokerAddr信息，那么会不会存在老的没有删除呢？？？，当然不会
+              //因为此处返回的是所有有效的BrokerData信息，而且 getBrokerAddrs 返回的是现在所有的有效的Broker的Map集合，或者说是所有有效Broker整体更新，并不是
+              //某一条的Broker信息进行更新。整体则不存在拥有之前无用的Broker数据
+              //探究：但是会存在，如果一个BrokerName所有的Broker都有问题，则此处不会进行删除，会在本地缓存中存在脏数据的问题
+              for (BrokerData bd : topicRouteData.getBrokerDatas()) {
+                this.brokerAddrTable.put(bd.getBrokerName(), bd.getBrokerAddrs());
+              }
+  
+              // Update Pub info：更新推送主题的基本路由信息
+              {
+  
+                //更新topicPublishInfo的 主题的消息队列信息，相当于一个主题的所有可用的队列信息，其中都是可写的队列
+                TopicPublishInfo publishInfo = topicRouteData2TopicPublishInfo(topic, topicRouteData);
+                publishInfo.setHaveTopicRouterInfo(true);
+                Iterator<Entry<String, MQProducerInner>> it = this.producerTable.entrySet().iterator();
+                while (it.hasNext()) {
+                  Entry<String, MQProducerInner> entry = it.next();
+                  MQProducerInner impl = entry.getValue();
+                  if (impl != null) {
+                    //更新该MQClientInstance 所管辖的所有消息发送关于topic的路由信息
+                    impl.updateTopicPublishInfo(topic, publishInfo);
+                  }
+                }
+              }
+  
+              // Update sub info：更新订阅主题的基本路由信息
+              {
+                //获取topicRouteData 中所有具有读权限的 消息队列基本信息
+                Set<MessageQueue> subscribeInfo = topicRouteData2TopicSubscribeInfo(topic, topicRouteData);
+                Iterator<Entry<String, MQConsumerInner>> it = this.consumerTable.entrySet().iterator();
+                while (it.hasNext()) {
+                  Entry<String, MQConsumerInner> entry = it.next();
+                  MQConsumerInner impl = entry.getValue();
+                  if (impl != null) {
+  
+                    //跟新 主题 所订阅的 消息队列信息
+                    impl.updateTopicSubscribeInfo(topic, subscribeInfo);
+                  }
+                }
+              }
+              log.info("topicRouteTable.put. Topic = {}, TopicRouteData[{}]", topic, cloneTopicRouteData);
+              this.topicRouteTable.put(topic, cloneTopicRouteData);
+              return true;
+            }
+          } else {
+            log.warn("updateTopicRouteInfoFromNameServer, getTopicRouteInfoFromNameServer return null, Topic: {}", topic);
+          }
+        } catch (MQClientException e) {
+          if (!topic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX) && !topic.equals(MixAll.AUTO_CREATE_TOPIC_KEY_TOPIC)) {
+            log.warn("updateTopicRouteInfoFromNameServer Exception", e);
+          }
+        } catch (RemotingException e) {
+          log.error("updateTopicRouteInfoFromNameServer Exception", e);
+          throw new IllegalStateException(e);
+        } finally {
+          this.lockNamesrv.unlock();
+        }
+      } else {
+        log.warn("updateTopicRouteInfoFromNameServer tryLock timeout {}ms", LOCK_TIMEOUT_MILLIS);
+      }
+    } catch (InterruptedException e) {
+      log.warn("updateTopicRouteInfoFromNameServer Exception", e);
+    }
+  
+    return false;
+  }
+  ```
+
+##### selectOneMessageQueue
+
+```java
+public MessageQueue selectOneMessageQueue(final TopicPublishInfo tpInfo, final String lastBrokerName) {
+  return this.mqFaultStrategy.selectOneMessageQueue(tpInfo, lastBrokerName);
+}
+```
+
+* MQFaultStrategy--获取消息队列的门面类，底层为TopicPublishInfo来获取消息队列信息
+
+  * 故障容错机制：就是为了避免少走弯路，如果Broker一段时间不可用，使用该机制就暂时先不选择这个Broker，选择其他可用的Broker避免没必要的资源浪费。
+  
+  ![Latency类图](../../../../照片/typora/03.png)
+  
+  ```java
+  /**
+   * MQ 故障策略
+   *
+   * 延迟实现的门面类,包含了很多的实现，包括默认和Broker延迟容错机制
+   *
+   *  屏蔽了延迟接口的对外直接使用
+   */
+  public class MQFaultStrategy {
+      private final static InternalLogger log = ClientLogger.getLog();
+    
+      //延迟故障容错，维护每个Broker的发送消息的延迟
+      //key:brokerName
+      private final LatencyFaultTolerance<String> latencyFaultTolerance = new LatencyFaultToleranceImpl();
+  
+      //发送消息延迟容错开关
+      private boolean sendLatencyFaultEnable = false;
+  
+  
+      //作用：根据 currentLatency 本次消息 发送延迟，从 latencyMax 尾部向前找到
+      //第一个比 currentLatency 小的索引 index，如果没有找到，返回0
+      //然后 根据这个索引从notAvailableDuration 数组中取出对应的时间 ，在这个时长内，Broker将设为不可用
+  
+      //TODO 啥意思：就是根据区间获取broker的规避，不可用时长，通过，延迟时间然后获取到区间然后获取到不参与路由负载的时间延迟
+  
+      //毫秒，550ms内的时间，都认为是broker节点可用时间
+      private long[] latencyMax = {50L, 100L, 550L, 1000L, 2000L, 3000L, 15000L};
+      //不参与路由负载的时间延迟
+      private long[] notAvailableDuration = {0L, 0L, 30000L, 60000L, 120000L, 180000L, 600000L};
+  
+      
+  
+      /**
+       * 选择一个可以发送的消息队列信息
+       * @param tpInfo
+       * @param lastBrokerName
+       * @return
+       */
+      public MessageQueue selectOneMessageQueue(final TopicPublishInfo tpInfo, final String lastBrokerName) {
+  
+  
+          //--------------------Broker故障延迟机制-----------------------
+          //核心原理，底层使用了一个Map保存，broker已经在不可路由的时间，达到剔除的目的，使用latencyFaultTolerance来实现，优先获取可用队列，其次选择一个broker获取队列，最差返回任意broker的一个队列
+          if (this.sendLatencyFaultEnable) {
+              try {
+                  //遍历队列，判断该broker是否可用（根据latencyFaultTolerance.isAvailable判断），剔除一段时间内不可用的broker
+                  int index = tpInfo.getSendWhichQueue().getAndIncrement();
+  
+                  //------------------------1. 对消息队列进行轮询获取一个消息队列------------------------------
+                  for (int i = 0; i < tpInfo.getMessageQueueList().size(); i++) {
+  
+                      //选择消息队列的下标
+                      int pos = Math.abs(index++) % tpInfo.getMessageQueueList().size();
+                      if (pos < 0)
+                          pos = 0;
+  
+                      //选择消息队列
+                      MessageQueue mq = tpInfo.getMessageQueueList().get(pos);
+  
+                      //验证该消息队列是否可用
+                      if (latencyFaultTolerance.isAvailable(mq.getBrokerName())) {
+  
+                          //null,表示第一次执行消息队列，直接返回选择队列信息
+                          //.eqaul , 表示当前还是上次发送失败的broker，但是已经选择了不同的broker的队列信息，因为自增字段已经增加，直接返回
+                          if (null == lastBrokerName || mq.getBrokerName().equals(lastBrokerName))
+                              return mq;
+                      }
+                  }
+  
+  
+                  //如果所有的broker都不可用，则随机选择一个broker，随机选择该broker下一个队列进行发送
+                  final String notBestBroker = latencyFaultTolerance.pickOneAtLeast();
+                  int writeQueueNums = tpInfo.getQueueIdByBroker(notBestBroker);
+                  if (writeQueueNums > 0) {
+                      final MessageQueue mq = tpInfo.selectOneMessageQueue();
+                      if (notBestBroker != null) {
+                          mq.setBrokerName(notBestBroker);
+                          mq.setQueueId(tpInfo.getSendWhichQueue().getAndIncrement() % writeQueueNums);
+                      }
+                      return mq;
+                  } else {
+                      latencyFaultTolerance.remove(notBestBroker);
+                  }
+              } catch (Exception e) {
+                  log.error("Error occurred when selecting message queue", e);
+              }
+  
+              return tpInfo.selectOneMessageQueue();
+          }
+  
+  
+          //--------------------默认机制-----------------------
+          //不开启，Broker故障延迟机制
+          return tpInfo.selectOneMessageQueue(lastBrokerName);
+      }
+  
+      /**
+       * 更新延迟容错信息
+       * @param brokerName
+       * @param currentLatency
+       * @param isolation 是否隔离，如果为true，使用默认时长30s来计算broker故障规避时长，如果为false，则使用本次消息发送延迟时间来计算Broker故障延迟时长
+       */
+      public void updateFaultItem(final String brokerName, final long currentLatency, boolean isolation) {
+          if (this.sendLatencyFaultEnable) {
+  
+              //计算因本次消息发送故障需要将Broker规避的时长，即接下来多久的时间内该Broker将不参与消息发送队列负载
+              long duration = computeNotAvailableDuration(isolation ? 30000 : currentLatency);
+              this.latencyFaultTolerance.updateFaultItem(brokerName, currentLatency, duration);
+          }
+      }
+      
+      //计算延迟对应的不可用时间
+      private long computeNotAvailableDuration(final long currentLatency) {
+  
+          //找到第一个比此值小的值，作为不可用的延迟时间
+          for (int i = latencyMax.length - 1; i >= 0; i--) {
+              if (currentLatency >= latencyMax[i])
+                  return this.notAvailableDuration[i];
+          }
+  
+          return 0;
+      }
+  }
+  ```
+  
+* LatencyFaultTolerance：延迟故障容错接口
+
+  ```java
+  1: public interface LatencyFaultTolerance<T> {
+   2: 
+   3:     /**
+   4:      * 更新对应的延迟和不可用时长
+   5:      *
+   6:      * @param name 对象
+   7:      * @param currentLatency 延迟
+   8:      * @param notAvailableDuration 不可用时长
+   9:      */
+  10:     void updateFaultItem(final T name, final long currentLatency, final long notAvailableDuration);
+  11: 
+  12:     /**
+  13:      * 对象是否可用
+  14:      *
+  15:      * @param name 对象
+  16:      * @return 是否可用
+  17:      */
+  18:     boolean isAvailable(final T name);
+  19: 
+  20:     /**
+  21:      * 移除对象
+  22:      *
+  23:      * @param name 对象
+  24:      */
+  25:     void remove(final T name);
+  26: 
+  27:     /**
+  28:      * 获取一个对象
+  29:      *
+  30:      * @return 对象
+  31:      */
+  32:     T pickOneAtLeast();
+  33: }
+  ```
+
+  延迟容错实现
+
+  ```java
+   1: public class LatencyFaultToleranceImpl implements LatencyFaultTolerance<String> {
+   2: 
+   3:     /**
+   4:      * 对象故障信息Table
+   5:      */
+   6:     private final ConcurrentHashMap<String, FaultItem> faultItemTable = new ConcurrentHashMap<>(16);
+   7:     /**
+   8:      * 对象选择Index
+   9:      * @see #pickOneAtLeast()
+  10:      */
+  11:     private final ThreadLocalIndex whichItemWorst = new ThreadLocalIndex();
+  12: 
+  13:     @Override
+  14:     public void updateFaultItem(final String name, final long currentLatency, final long notAvailableDuration) {
+  15:         FaultItem old = this.faultItemTable.get(name);
+  16:         if (null == old) {
+  17:             // 创建对象
+  18:             final FaultItem faultItem = new FaultItem(name);
+  19:             faultItem.setCurrentLatency(currentLatency);
+  20:             faultItem.setStartTimestamp(System.currentTimeMillis() + notAvailableDuration);
+  21:             // 更新对象
+  22:             old = this.faultItemTable.putIfAbsent(name, faultItem);
+  23:             if (old != null) {
+  24:                 old.setCurrentLatency(currentLatency);
+  25:                 old.setStartTimestamp(System.currentTimeMillis() + notAvailableDuration);
+  26:             }
+  27:         } else { // 更新对象
+  28:             old.setCurrentLatency(currentLatency);
+  29:             old.setStartTimestamp(System.currentTimeMillis() + notAvailableDuration);
+  30:         }
+  31:     }
+  32: 
+  33:     @Override
+  34:     public boolean isAvailable(final String name) {
+  35:         final FaultItem faultItem = this.faultItemTable.get(name);
+  36:         if (faultItem != null) {
+  37:             return faultItem.isAvailable();
+  38:         }
+  39:         return true;
+  40:     }
+  41: 
+  42:     @Override
+  43:     public void remove(final String name) {
+  44:         this.faultItemTable.remove(name);
+  45:     }
+  46: 
+  47:     /**
+  48:      * 选择一个相对优秀的对象
+  49:      *
+  50:      * @return 对象
+  51:      */
+  52:     @Override
+  53:     public String pickOneAtLeast() {
+  54:         // 创建数组
+  55:         final Enumeration<FaultItem> elements = this.faultItemTable.elements();
+  56:         List<FaultItem> tmpList = new LinkedList<>();
+  57:         while (elements.hasMoreElements()) {
+  58:             final FaultItem faultItem = elements.nextElement();
+  59:             tmpList.add(faultItem);
+  60:         }
+  61:         //
+  62:         if (!tmpList.isEmpty()) {
+  63:             // 打乱 + 排序。TODO 疑问：应该只能二选一。猜测Collections.shuffle(tmpList)去掉。
+  64:             Collections.shuffle(tmpList);
+  65:             Collections.sort(tmpList);
+  66:             // 选择顺序在前一半的对象
+  67:             final int half = tmpList.size() / 2;
+  68:             if (half <= 0) {
+  69:                 return tmpList.get(0).getName();
+  70:             } else {
+  71:                 final int i = this.whichItemWorst.getAndIncrement() % half;
+  72:                 return tmpList.get(i).getName();
+  73:             }
+  74:         }
+  75:         return null;
+  76:     }
+  77: }
+  ```
+
+* FaultItem：对象故障信息，维护对象的名字，延迟，开始可用的时间
+
+  ```java
+   1: class FaultItem implements Comparable<FaultItem> {
+   2:     /**
+   3:      * 对象名
+   4:      */
+   5:     private final String name;
+   6:     /**
+   7:      * 延迟
+   8:      */
+   9:     private volatile long currentLatency;
+  10:     /**
+  11:      * 开始可用时间
+  12:      */
+  13:     private volatile long startTimestamp;
+  14: 
+  15:     public FaultItem(final String name) {
+  16:         this.name = name;
+  17:     }
+  18: 
+  19:     /**
+  20:      * 比较对象
+  21:      * 可用性 > 延迟 > 开始可用时间
+  22:      *
+  23:      * @param other other
+  24:      * @return 升序
+  25:      */
+  26:     @Override
+  27:     public int compareTo(final FaultItem other) {
+  28:         if (this.isAvailable() != other.isAvailable()) {
+  29:             if (this.isAvailable())
+  30:                 return -1;
+  31: 
+  32:             if (other.isAvailable())
+  33:                 return 1;
+  34:         }
+  35: 
+  36:         if (this.currentLatency < other.currentLatency)
+  37:             return -1;
+  38:         else if (this.currentLatency > other.currentLatency) {
+  39:             return 1;
+  40:         }
+  41: 
+  42:         if (this.startTimestamp < other.startTimestamp)
+  43:             return -1;
+  44:         else if (this.startTimestamp > other.startTimestamp) {
+  45:             return 1;
+  46:         }
+  47: 
+  48:         return 0;
+  49:     }
+  50: 
+  51:     /**
+  52:      * 是否可用：当开始可用时间大于当前时间
+  53:      *
+  54:      * @return 是否可用
+  55:      */
+  56:     public boolean isAvailable() {
+  57:         return (System.currentTimeMillis() - startTimestamp) >= 0;
+  58:     }
+  59: 
+  60:     @Override
+  61:     public int hashCode() {
+  62:         int result = getName() != null ? getName().hashCode() : 0;
+  63:         result = 31 * result + (int) (getCurrentLatency() ^ (getCurrentLatency() >>> 32));
+  64:         result = 31 * result + (int) (getStartTimestamp() ^ (getStartTimestamp() >>> 32));
+  65:         return result;
+  66:     }
+  67: 
+  68:     @Override
+  69:     public boolean equals(final Object o) {
+  70:         if (this == o)
+  71:             return true;
+  72:         if (!(o instanceof FaultItem))
+  73:             return false;
+  74: 
+  75:         final FaultItem faultItem = (FaultItem) o;
+  76: 
+  77:         if (getCurrentLatency() != faultItem.getCurrentLatency())
+  78:             return false;
+  79:         if (getStartTimestamp() != faultItem.getStartTimestamp())
+  80:             return false;
+  81:         return getName() != null ? getName().equals(faultItem.getName()) : faultItem.getName() == null;
+  82: 
+  83:     }
+  84: }
+  ```
+
+  
+
+  
+
+
+
+##### sendKernelImpl
+
+```java
+/**
+     *
+     * @param msg 待发送消息
+     * @param mq 消息将发送到该消息队列上
+     * @param communicationMode 发送模式
+     * @param sendCallback 异步消息回调函数
+     * @param topicPublishInfo 主题路由信息
+     * @param timeout 消息发送超时时间
+     * @return
+     * @throws MQClientException
+     * @throws RemotingException
+     * @throws MQBrokerException
+     * @throws InterruptedException
+     */
+private SendResult sendKernelImpl(final Message msg,
+                                  final MessageQueue mq,
+                                  final CommunicationMode communicationMode,
+                                  final SendCallback sendCallback,
+                                  final TopicPublishInfo topicPublishInfo,
+                                  final long timeout) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+  long beginStartTime = System.currentTimeMillis();
+
+
+  //--------------------------------1. 寻找broker地址信息-----------------------------
+  //1. 根据MessageQueue获取Broker的网络地址，如果没有去NameServer中获取，如果没有则抛出异常
+  //可以看出，但凡涉及网络请求都是MQClientInstance
+
+  //1.1 本地获取
+  String brokerAddr = this.mQClientFactory.findBrokerAddressInPublish(mq.getBrokerName());
+  if (null == brokerAddr) {
+    //1.2 从NameSrv获取信息
+    tryToFindTopicPublishInfo(mq.getTopic());
+    brokerAddr = this.mQClientFactory.findBrokerAddressInPublish(mq.getBrokerName());
+  }
+
+
+
+  SendMessageContext context = null;
+  if (brokerAddr != null) {
+    brokerAddr = MixAll.brokerVIPChannel(this.defaultMQProducer.isSendMessageWithVIPChannel(), brokerAddr);
+
+    byte[] prevBody = msg.getBody();
+    try {
+
+
+      //--------------------------------2. 发送前的前置处理，包括全局ID，压缩，事务，钩子函数-----------------------------
+      // 进行对象的转换，转换成请求的统一逻辑
+      //1. 给消息设置全局唯一ID
+      //for MessageBatch,ID has been set in the generating process
+      if (!(msg instanceof MessageBatch)) {
+        MessageClientIDSetter.setUniqID(msg);
+      }
+
+      boolean topicWithNamespace = false;
+      if (null != this.mQClientFactory.getClientConfig().getNamespace()) {
+        msg.setInstanceId(this.mQClientFactory.getClientConfig().getNamespace());
+        topicWithNamespace = true;
+      }
+
+      int sysFlag = 0;
+      boolean msgBodyCompressed = false;
+
+      //2. 如果消息超了4K，则会对消息进行zip压缩，并设置标志位
+      if (this.tryToCompressMessage(msg)) {
+        sysFlag |= MessageSysFlag.COMPRESSED_FLAG;
+        msgBodyCompressed = true;
+      }
+
+      //3. 如果是事务消息，则设置消息的系统标记
+      final String tranMsg = msg.getProperty(MessageConst.PROPERTY_TRANSACTION_PREPARED);
+      if (tranMsg != null && Boolean.parseBoolean(tranMsg)) {
+        sysFlag |= MessageSysFlag.TRANSACTION_PREPARED_TYPE;
+      }
+
+
+      //hook：发送消息校验
+      if (hasCheckForbiddenHook()) {
+        CheckForbiddenContext checkForbiddenContext = new CheckForbiddenContext();
+        checkForbiddenContext.setNameSrvAddr(this.defaultMQProducer.getNamesrvAddr());
+        checkForbiddenContext.setGroup(this.defaultMQProducer.getProducerGroup());
+        checkForbiddenContext.setCommunicationMode(communicationMode);
+        checkForbiddenContext.setBrokerAddr(brokerAddr);
+        checkForbiddenContext.setMessage(msg);
+        checkForbiddenContext.setMq(mq);
+        checkForbiddenContext.setUnitMode(this.isUnitMode());
+        this.executeCheckForbiddenHook(checkForbiddenContext);
+      }
+
+
+      //发送消息前逻辑
+      //4. 如果注册了消息发送钩子函数，则执行消息发送之前的增强逻辑，多个时按照加入的顺序执行
+      if (this.hasSendMessageHook()) {
+        context = new SendMessageContext();
+        context.setProducer(this);
+        context.setProducerGroup(this.defaultMQProducer.getProducerGroup());
+        context.setCommunicationMode(communicationMode);
+        context.setBornHost(this.defaultMQProducer.getClientIP());
+        context.setBrokerAddr(brokerAddr);
+        context.setMessage(msg);
+        context.setMq(mq);
+        context.setNamespace(this.defaultMQProducer.getNamespace());
+        String isTrans = msg.getProperty(MessageConst.PROPERTY_TRANSACTION_PREPARED);
+        if (isTrans != null && isTrans.equals("true")) {
+          context.setMsgType(MessageType.Trans_Msg_Half);
+        }
+
+        if (msg.getProperty("__STARTDELIVERTIME") != null || msg.getProperty(MessageConst.PROPERTY_DELAY_TIME_LEVEL) != null) {
+          context.setMsgType(MessageType.Delay_Msg);
+        }
+        this.executeSendMessageHookBefore(context);
+      }
+
+
+      //--------------------------------3. 构建消息发送请求包-----------------------------
+      //主要包含如下重要信息：生产者组、主题名称、默认
+      //创建主题 Key 、该主题在单个 Broker 默认 队列数、队 ID （队列序号）、消息系统标
+      //( MessageSysFlag 消息发 时间 、消息标记（ RocketMQ 对消息中的 flag 不做任何处理
+      //供应用程序使用） 消息扩展属性 、消息重试次数、是否是批量消息等
+      SendMessageRequestHeader requestHeader = new SendMessageRequestHeader();
+      requestHeader.setProducerGroup(this.defaultMQProducer.getProducerGroup());
+      requestHeader.setTopic(msg.getTopic());
+      requestHeader.setDefaultTopic(this.defaultMQProducer.getCreateTopicKey());
+      requestHeader.setDefaultTopicQueueNums(this.defaultMQProducer.getDefaultTopicQueueNums());
+      requestHeader.setQueueId(mq.getQueueId());
+      requestHeader.setSysFlag(sysFlag);
+      requestHeader.setBornTimestamp(System.currentTimeMillis());
+      requestHeader.setFlag(msg.getFlag());
+      requestHeader.setProperties(MessageDecoder.messageProperties2String(msg.getProperties()));
+      requestHeader.setReconsumeTimes(0);
+      requestHeader.setUnitMode(this.isUnitMode());
+      requestHeader.setBatch(msg instanceof MessageBatch);
+      if (requestHeader.getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
+        String reconsumeTimes = MessageAccessor.getReconsumeTime(msg);
+        if (reconsumeTimes != null) {
+          requestHeader.setReconsumeTimes(Integer.valueOf(reconsumeTimes));
+          MessageAccessor.clearProperty(msg, MessageConst.PROPERTY_RECONSUME_TIME);
+        }
+
+        String maxReconsumeTimes = MessageAccessor.getMaxReconsumeTimes(msg);
+        if (maxReconsumeTimes != null) {
+          requestHeader.setMaxReconsumeTimes(Integer.valueOf(maxReconsumeTimes));
+          MessageAccessor.clearProperty(msg, MessageConst.PROPERTY_MAX_RECONSUME_TIMES);
+        }
+      }
+
+
+      //--------------------------------4. 消息发送-----------------------------
+      SendResult sendResult = null;
+      switch (communicationMode) {
+          //异步
+        case ASYNC:
+          Message tmpMessage = msg;
+          boolean messageCloned = false;
+          if (msgBodyCompressed) {
+            //If msg body was compressed, msgbody should be reset using prevBody.
+            //Clone new message using commpressed message body and recover origin massage.
+            //Fix bug:https://github.com/apache/rocketmq-externals/issues/66
+            tmpMessage = MessageAccessor.cloneMessage(msg);
+            messageCloned = true;
+            msg.setBody(prevBody);
+          }
+
+          if (topicWithNamespace) {
+            if (!messageCloned) {
+              tmpMessage = MessageAccessor.cloneMessage(msg);
+              messageCloned = true;
+            }
+            msg.setTopic(NamespaceUtil.withoutNamespace(msg.getTopic(), this.defaultMQProducer.getNamespace()));
+          }
+
+          long costTimeAsync = System.currentTimeMillis() - beginStartTime;
+          if (timeout < costTimeAsync) {
+            throw new RemotingTooMuchRequestException("sendKernelImpl call timeout");
+          }
+
+          //4.1 异步发送消息
+          sendResult = this.mQClientFactory.getMQClientAPIImpl().sendMessage(
+            brokerAddr,
+            mq.getBrokerName(),
+            tmpMessage,
+            requestHeader,
+            timeout - costTimeAsync,
+            communicationMode,
+            sendCallback,
+            topicPublishInfo,
+            this.mQClientFactory,
+            this.defaultMQProducer.getRetryTimesWhenSendAsyncFailed(),
+            context,
+            this);
+          break;
+          //同步
+        case ONEWAY:
+        case SYNC:
+          long costTimeSync = System.currentTimeMillis() - beginStartTime;
+          if (timeout < costTimeSync) {
+            throw new RemotingTooMuchRequestException("sendKernelImpl call timeout");
+          }
+
+          //4.2 同步发送消息
+          sendResult = this.mQClientFactory.getMQClientAPIImpl().sendMessage(
+            brokerAddr,
+            mq.getBrokerName(),
+            msg,
+            requestHeader,
+            timeout - costTimeSync,
+            communicationMode,
+            context,
+            this);
+          break;
+        default:
+          assert false;
+          break;
+      }
+
+
+      //--------------------------------5. 执行钩子函数的结束方法，多个时按照加入的顺序执行-----------------------------
+      if (this.hasSendMessageHook()) {
+        context.setSendResult(sendResult);
+        this.executeSendMessageHookAfter(context);
+      }
+
+      return sendResult;
+    } catch (RemotingException e) {
+      if (this.hasSendMessageHook()) {
+        context.setException(e);
+        this.executeSendMessageHookAfter(context);
+      }
+      throw e;
+    } catch (MQBrokerException e) {
+      if (this.hasSendMessageHook()) {
+        context.setException(e);
+        this.executeSendMessageHookAfter(context);
+      }
+      throw e;
+    } catch (InterruptedException e) {
+      if (this.hasSendMessageHook()) {
+        context.setException(e);
+        this.executeSendMessageHookAfter(context);
+      }
+      throw e;
+    } finally {
+      msg.setBody(prevBody);
+      msg.setTopic(NamespaceUtil.withoutNamespace(msg.getTopic(), this.defaultMQProducer.getNamespace()));
+    }
+  }
+
+
+  //如果没有找到broker信息，则抛出异常
+  throw new MQClientException("The broker[" + mq.getBrokerName() + "] not exist", null);
+}
+```
+
+* MQClientAPIImpl#sendMessage
+
+  ```java
+  public SendResult sendMessage(
+    final String addr,
+    final String brokerName,
+    final Message msg,
+    final SendMessageRequestHeader requestHeader,
+    final long timeoutMillis,
+    final CommunicationMode communicationMode,
+    final SendCallback sendCallback,
+    final TopicPublishInfo topicPublishInfo,
+    final MQClientInstance instance,
+    final int retryTimesWhenSendFailed,
+    final SendMessageContext context,
+    final DefaultMQProducerImpl producer
+  ) throws RemotingException, MQBrokerException, InterruptedException {
+    long beginStartTime = System.currentTimeMillis();
+    RemotingCommand request = null;
+    String msgType = msg.getProperty(MessageConst.PROPERTY_MESSAGE_TYPE);
+    boolean isReply = msgType != null && msgType.equals(MixAll.REPLY_MESSAGE_FLAG);
+  
+    //重发的消息
+    if (isReply) {
+      if (sendSmartMsg) {
+        SendMessageRequestHeaderV2 requestHeaderV2 = SendMessageRequestHeaderV2.createSendMessageRequestHeaderV2(requestHeader);
+        request = RemotingCommand.createRequestCommand(RequestCode.SEND_REPLY_MESSAGE_V2, requestHeaderV2);
+      } else {
+        //构建通讯协议体
+        request = RemotingCommand.createRequestCommand(RequestCode.SEND_REPLY_MESSAGE, requestHeader);
+      }
+    } else {
+      if (sendSmartMsg || msg instanceof MessageBatch) {
+        SendMessageRequestHeaderV2 requestHeaderV2 = SendMessageRequestHeaderV2.createSendMessageRequestHeaderV2(requestHeader);
+        request = RemotingCommand.createRequestCommand(msg instanceof MessageBatch ? RequestCode.SEND_BATCH_MESSAGE : RequestCode.SEND_MESSAGE_V2, requestHeaderV2);
+      } else {
+  
+        //构建单挑消息的请求 RemotingCommand ，所有请求都会转换成  RemotingCommand
+        request = RemotingCommand.createRequestCommand(RequestCode.SEND_MESSAGE, requestHeader);
+      }
+    }
+    request.setBody(msg.getBody());
+  
+    switch (communicationMode) {
+      case ONEWAY:
+        this.remotingClient.invokeOneway(addr, request, timeoutMillis);
+        return null;
+      case ASYNC:
+        final AtomicInteger times = new AtomicInteger();
+        long costTimeAsync = System.currentTimeMillis() - beginStartTime;
+        if (timeoutMillis < costTimeAsync) {
+          throw new RemotingTooMuchRequestException("sendMessage call timeout");
+        }
+        this.sendMessageAsync(addr, brokerName, msg, timeoutMillis - costTimeAsync, request, sendCallback, topicPublishInfo, instance,
+                              retryTimesWhenSendFailed, times, context, producer);
+        return null;
+      case SYNC:
+        long costTimeSync = System.currentTimeMillis() - beginStartTime;
+        if (timeoutMillis < costTimeSync) {
+          throw new RemotingTooMuchRequestException("sendMessage call timeout");
+        }
+  
+        //同步发送消息
+        return this.sendMessageSync(addr, brokerName, msg, timeoutMillis - costTimeSync, request);
+      default:
+        assert false;
+        break;
+    }
+  
+    return null;
+  }
+  ```
+
+  
+
+
+
+### MessageClientIDSetter
+
+* 创建消息的唯一ID
+
+#### createUniqID
+
+```java
+public class MessageClientIDSetter {
+    private static final String TOPIC_KEY_SPLITTER = "#";
+    private static final int LEN;
+    private static final String FIX_STRING;
+    private static final AtomicInteger COUNTER;
+    private static long startTime;
+    private static long nextStartTime;
+
+    static {
+        byte[] ip;
+        try {
+            ip = UtilAll.getIP();
+        } catch (Exception e) {
+            ip = createFakeIP();
+        }
+        LEN = ip.length + 2 + 4 + 4 + 2;
+        ByteBuffer tempBuffer = ByteBuffer.allocate(ip.length + 2 + 4);
+        tempBuffer.put(ip);
+        tempBuffer.putShort((short) UtilAll.getPid());
+        tempBuffer.putInt(MessageClientIDSetter.class.getClassLoader().hashCode());
+        FIX_STRING = UtilAll.bytes2string(tempBuffer.array());
+        setStartTime(System.currentTimeMillis());
+        COUNTER = new AtomicInteger(0);
+    }
+  
+  
+        public static String createUniqID() {
+        StringBuilder sb = new StringBuilder(LEN * 2);
+        // 静态方法，在启动的时候初始化，内容包含 IP:PORT,classloader的hashCode，
+        //          这个就确保了不同的物理机不同的Tomcat启动的应用肯定不一样，但是不能保证应用范围内的不同
+        sb.append(FIX_STRING);
+
+        sb.append(UtilAll.bytes2string(createUniqIDBuffer()));
+        return sb.toString();
+    }
+
+    //6位，前4位表示时间差值，后面2位表示一个自增值。自增值决定了同一时间肯定不同
+    private static byte[] createUniqIDBuffer() {
+        ByteBuffer buffer = ByteBuffer.allocate(4 + 2);
+        long current = System.currentTimeMillis();
+        if (current >= nextStartTime) {
+            setStartTime(current);
+        }
+        buffer.putInt((int) (System.currentTimeMillis() - startTime));
+        buffer.putShort((short) COUNTER.getAndIncrement());
+        return buffer.array();
+    }
+  
+  
+    public static void setUniqID(final Message msg) {
+        if (msg.getProperty(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX) == null) {
+            msg.putProperty(MessageConst.PROPERTY_UNIQ_CLIENT_MESSAGE_ID_KEYIDX, createUniqID());
+        }
+    }
+  
+}  
+```
+
+
+
+
+
+
+
+
+
+### 问题
+
+1. 发送消息的时候，获取消息队列时，获取有用broker时，为何内存中还保留着无效的Broker信息，不进行删除？？？
+   * 首先， NameServer检测Broker 是否可用是有延迟的，最短为一次心跳检测间隔（ 10s ）； 其次， NameServer不会检测到 Broker 岩机后马上推送消息给消息生产者，而是消息生产者每隔 30s 更新一次路由信息，所以消息生产者 快感知 Broker 最新的路由信息也需要 30s 如果能引人一种机制，在Broker 机期间，如果一次消息发送失败后，可以将该 Broker 暂时排除在消息队列的选择范围中
+2. 自增量 sendWhichQueue 如何做到线程隔离？？？
+   * sendWhichQueue用于递增，用于每次将上次有问题的Broker排除出去，逻辑，先获取取模之后的消息队列，然后判断broker是不是上一次有问题的broker，是则获取下一个消息队列，底层使用ThreadLocal实现，不需要进行清除，为何？？因为是递增量，获取Broker中的消息队列时，最大值之后会变成0，且会与消息队列长度取模，不需要进行清零操作，取模自会成为0
+3. 既然这里有了broker的剔除机制，又为什么要单独设计一个broker故障延迟机制呢？
+   * 大家可以想想，在一次消息发送过程中，该方案能够规避上次发送失败的broker，重新对消息队列进行选择。但是如果是N次消息发送呢，而且都是第一次呢？N次发送都有可能会选择到故障broker的消息队列。所以broker故障转移机制能够在一定时间范围内，规避选择到故障的broker
+4. 消息队列是如何选择的，即producer向哪个消息队列里发送消息？消息发送失败了怎么办(网络原因，broker挂掉)？发送端如何实现的高可用？
+   * 在默认队列选择机制下，会随机选择一个MessageQueue，若发送失败，轮询队列重新进行重试发送(屏蔽单次发送中不可用的broker)，同步模式下默认失败时重试发送2次
+   * 在开启容错机制后，消息队列选择时，会在一段时间内过滤掉mq认为不可用的broker，以此来避免不断向宕机的broker发送消息，从而实现消息发送高可用
+5. 两中机制下的选择，如果直接暴露给上层使用，是不合适的，以为功能都是用来选择消息队列，怎么解决？？？
+   * 使用门面模式，提供了专门用于获取消息队列的门面方法，具体源码会有
+6. 重试的实现方式？？？
+   * for循环，内部捕获异常，不会影响重试机制
+7. MQClientInstance的作用？？？
+   * 负责执行与Broker或者NameSrv的网络请求
+8. Producer消息发送容错策略，逻辑
+   1. 优先获取可用队列，其次选择一个broker获取队列，最差返回任意broker的一个队列
