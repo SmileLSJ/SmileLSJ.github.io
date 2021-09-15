@@ -1,13 +1,13 @@
 ---
 layout:     post
-title:      "ServiceThread"
+title:      "RocketMQ技术内幕学习-针对点-02--ServiceThread"
 date:       2021-09-01 12:00:00
 author:     "LSJ"
 header-img: "img/post-bg-2015.jpg"
 tags:
-    -RocketMQ
-    -CountDownLatch2
-    -ServiceThread
+    RocketMQ
+    CountDownLatch2
+    ServiceThread
 ---
 
 
