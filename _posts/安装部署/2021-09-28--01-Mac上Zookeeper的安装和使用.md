@@ -258,7 +258,7 @@ Stopping zookeeper ... STOPPED
 
 配置文件截图
 
-![img](../../img/webp-20210928100057915)
+<img src="../../img/image-20210928134522499.png" alt="image-20210928134522499" style="zoom:50%;" />
 
 转载链接：https://www.jianshu.com/p/5491d16e6abd/
 
