@@ -1,7 +1,7 @@
 ---
 layout:     post
 title:      "DDD-01-Domain Primitive"
-date:       2021-09-22 12:00:00
+date:       2021-10-10 12:00:00
 author:     "LSJ"
 header-img: "img/post-bg-2015.jpg"
 tags:
