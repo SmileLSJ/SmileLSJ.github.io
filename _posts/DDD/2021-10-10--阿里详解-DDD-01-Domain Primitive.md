@@ -65,7 +65,7 @@ Primitive 的定义是：
 
 先不要去纠结这个根据用户电话去发奖金的业务逻辑是否合理，也先不要去管用户是否应该在注册时和业务员做绑定，这里我们看的主要还是如何更加合理的去实现这个逻辑。一个简单的用户和用户注册的代码实现如下：
 
-```
+```java
 public class User {
     Long userId;
     String name;
@@ -127,13 +127,13 @@ public class RegistrationServiceImpl implements RegistrationService {
 
 在Java代码中，对于一个方法来说所有的参数名在编译时丢失，留下的仅仅是一个参数类型的列表，所以我们重新看一下以上的接口定义，其实在运行时仅仅是：
 
-```
+```java
 User register(String, String, String);
 ```
 
 所以以下的代码是一段编译器完全不会报错的，很难通过看代码就能发现的 bug ：
 
-```
+```java
 service.register("殷浩", "浙江省杭州市余杭区文三西路969号", "0571-12345678");
 ```
 
@@ -141,7 +141,7 @@ service.register("殷浩", "浙江省杭州市余杭区文三西路969号", "057
 
 另外一种常见的，特别是在查询服务中容易出现的例子如下：
 
-```
+```java
 User findByName(String name);
 User findByPhone(String phone);
 User findByNameAndPhone(String name, String phone);
@@ -153,7 +153,7 @@ User findByNameAndPhone(String name, String phone);
 
 在前面这段数据校验代码：
 
-```
+```java
 if (phone == null || !isValidPhoneNumber(phone)) {
     throw new ValidationException("phone");
 }
@@ -161,7 +161,7 @@ if (phone == null || !isValidPhoneNumber(phone)) {
 
 在日常编码中经常会出现，一般来说这种代码需要出现在方法的最前端，确保能够 fail-fast 。但是假设你有多个类似的接口和类似的入参，在每个方法里这段逻辑会被重复。而更严重的是如果未来我们要拓展电话号去包含手机时，很可能需要加入以下代码：
 
-```
+```java
 if (phone == null || !isValidPhoneNumber(phone) || !isValidCellNumber(phone)) {
     throw new ValidationException("phone");
 }
@@ -171,7 +171,7 @@ if (phone == null || !isValidPhoneNumber(phone) || !isValidCellNumber(phone)) {
 
 如果有个新的需求，需要把入参错误的原因返回，那么这段代码就变得更加复杂：
 
-```
+```java
 if (phone == null) {
     throw new ValidationException("phone不能为空");
 } else if (!isValidPhoneNumber(phone)) {
@@ -185,7 +185,7 @@ if (phone == null) {
 
 在传统Java架构里有几个办法能够去解决一部分问题，常见的如BeanValidation注解或ValidationUtils类，比如：
 
-```
+```java
 // Use Bean Validation
 User registerWithBeanValidation(
   @NotNull @NotBlank String name,
@@ -221,7 +221,7 @@ public User registerWithUtils(String name, String phone, String address) {
 
 在这段代码里：
 
-```
+```java
 String areaCode = null;
 String[] areas = new String[]{"0571", "021", "010"};
 for (int i = 0; i < phone.length(); i++) {
@@ -238,7 +238,7 @@ SalesRep rep = salesRepRepo.findRep(areaCode);
 
 所以，一个常见的办法是将这段代码抽离出来，变成独立的一个或多个方法：
 
-```
+```java
 private static String findAreaCode(String phone) {
     for (int i = 0; i < phone.length(); i++) {
         String prefix = phone.substring(0, i);
@@ -257,7 +257,7 @@ private static boolean isAreaCode(String prefix) {
 
 然后原始代码变为：
 
-```
+```java
 String areaCode = findAreaCode(phone);
 SalesRep rep = salesRepRepo.findRep(areaCode);
 ```
@@ -304,7 +304,7 @@ SalesRep rep = salesRepRepo.findRep(areaCode);
 
 在这里，我们可以看到，原来电话号仅仅是用户的一个参数，属于隐形概念，但实际上电话号的区号才是真正的业务逻辑，而我们需要将电话号的概念显性化，通过写一个Value Object：
 
-```
+```java
 public class PhoneNumber {
   
     private final String number;
@@ -361,7 +361,7 @@ public class PhoneNumber {
 
 我们看一下全面使用了 DP 之后效果：
 
-```
+```java
 public class User {
     UserId userId;
     Name name;
@@ -397,13 +397,13 @@ public User register(
 
 重构后的方法签名变成了很清晰的：
 
-```
+```java
 public User register(Name, PhoneNumber, Address)
 ```
 
 而之前容易出现的bug，如果按照现在的写法
 
-```
+```java
 service.register(new Name("殷浩"), new Address("浙江省杭州市余杭区文三西路969号"), new PhoneNumber("0571-12345678"));
 ```
 
@@ -411,7 +411,7 @@ service.register(new Name("殷浩"), new Address("浙江省杭州市余杭区文
 
 **▍评估2 - 数据验证和错误处理**
 
-```
+```java
 public User register(
   @NotNull Name name,
   @NotNull PhoneNumber phone,
@@ -425,7 +425,7 @@ public User register(
 
 **▍评估3 - 业务代码的清晰度**
 
-```
+```java
 SalesRep rep = salesRepRepo.findRep(phone.getAreaCode());
 User user = xxx;
 return userRepo.save(user);
@@ -464,7 +464,7 @@ return userRepo.save(user);
 
 假设现在要实现一个功能，让A用户可以支付 x 元给用户 B ，可能的实现如下：
 
-```
+```java
 public void pay(BigDecimal money, Long recipientId) {
     BankService.transfer(money, "CNY", recipientId);
 }
@@ -484,7 +484,7 @@ public void pay(BigDecimal money, Long recipientId) {
 
 所以当我们做这个支付功能时，实际上需要的一个入参是支付金额 + 支付货币。我们可以把这两个概念组合成为一个独立的完整概念：Money。
 
-```
+```java
 @Value
 public class Money {
     private BigDecimal amount;
@@ -498,7 +498,7 @@ public class Money {
 
 而原有的代码则变为：
 
-```
+```java
 public void pay(Money money, Long recipientId) {
     BankService.transfer(money, recipientId);
 }
@@ -510,7 +510,7 @@ public void pay(Money money, Long recipientId) {
 
 前面的案例升级一下，假设用户可能要做跨境转账从 CNY 到 USD ，并且货币汇率随时在波动：
 
-```
+```java
 public void pay(Money money, Currency targetCurrency, Long recipientId) {
     if (money.getCurrency().equals(targetCurrency)) {
         BankService.transfer(money, recipientId);
@@ -537,7 +537,7 @@ public void pay(Money money, Currency targetCurrency, Long recipientId) {
 
 在这个 case 里，可以将转换汇率的功能，封装到一个叫做 ExchangeRate 的 DP 里：
 
-```
+```java
 @Value
 public class ExchangeRate {
     private BigDecimal rate;
@@ -561,7 +561,7 @@ public class ExchangeRate {
 
 ExchangeRate 汇率对象，通过封装金额计算逻辑以及各种校验逻辑，让原始代码变得极其简单：
 
-```
+```java
 public void pay(Money money, Currency targetCurrency, Long recipientId) {
     ExchangeRate rate = ExchangeService.getRate(money.getCurrency(), targetCurrency);
     Money targetMoney = rate.exchange(money);
@@ -631,7 +631,7 @@ Domain Primitive 是 Value Object 的进阶版，在原始 VO 的基础上要求
 
 为了保障现有方法的兼容性，在第二步不会去修改接口的签名，而是通过代码替换原有的校验逻辑和根 DP 相关的业务逻辑。比如：
 
-```
+```java
 public User register(String name, String phone, String address)
         throws ValidationException {
     if (name == null || name.length() == 0) {
@@ -657,7 +657,7 @@ public User register(String name, String phone, String address)
 
 通过 DP 替换代码后：
 
-```
+```java
 public User register(String name, String phone, String address)
         throws ValidationException {
     
@@ -678,7 +678,7 @@ public User register(String name, String phone, String address)
 
 创建新接口，将DP的代码提升到接口参数层：
 
-```
+```java
 public User register(Name name, PhoneNumber phone, Address address) {
     SalesRep rep = salesRepRepo.findRep(phone.getAreaCode());
 }
@@ -694,7 +694,7 @@ service.register("殷浩", "0571-12345678", "浙江省杭州市余杭区文三�
 
 改为：
 
-```
+```java
 service.register(new Name("殷浩"), new PhoneNumber("0571-12345678"), new Address("浙江省杭州市余杭区文三西路969号"));
 ```
 

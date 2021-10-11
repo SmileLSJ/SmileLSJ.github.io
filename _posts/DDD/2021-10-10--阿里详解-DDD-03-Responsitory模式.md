@@ -79,7 +79,7 @@ Entity（实体）这个词在计算机领域的最初应用可能是来自于Pe
 
 从上面的描述我们能看出来，数据库在本质上属于”硬件“，DAO 在本质上属于”固件“，而我们自己的代码希望是属于”软件“。但是，固件有个非常不好的特性，那就是会传播，也就是说当一个软件强依赖了固件时，由于固件的限制，会导致软件也变得难以变更，最终让软件变得跟固件一样难以变更。 举个软件很容易被“固化”的例子：
 
-```
+```java
 private OrderDAO orderDAO;
 
 public Long addOrder(RequestDTO request) {
@@ -102,7 +102,7 @@ public void doSomeBusiness(Long id) {
 
 在上面的这段简单代码里，该对象依赖了DAO，也就是依赖了DB。虽然乍一看感觉并没什么毛病，但是假设未来要加一个缓存逻辑，代码则需要改为如下：
 
-```
+```java
 private OrderDAO orderDAO;
 private Cache cache;
 
@@ -187,7 +187,7 @@ Data Converter：在Infrastructure层，Entity到DO的转化器没有一个标�
 
 如果是手写一个Assembler，通常我们会去实现2种类型的方法，如下；Data Converter的逻辑和此类似，略过。
 
-```
+```java
 public class DtoAssembler {
     // 通过各种实体，生成DTO
     public OrderDTO toDTO(Order order, Item item) {
@@ -212,7 +212,7 @@ public class DtoAssembler {
 
 我们能看出来通过抽象出一个Assembler/Converter对象，我们能把复杂的转化逻辑都收敛到一个对象中，并且可以很好的单元测试。这个也很好的收敛了常见代码里的转化逻辑。 在调用方使用时是非常方便的（请忽略各种异常逻辑）：
 
-```
+```java
 public class Application {
     private DtoAssembler assembler;
     private OrderRepository orderRepository;
@@ -235,7 +235,7 @@ public class Application {
 
 用了MapStruct之后，会节省大量的成本，让代码变得简洁如下：
 
-```
+```java
 @org.mapstruct.Mapper
 public interface DtoAssembler { // 注意这里变成了一个接口，MapStruct会生成实现类
     DtoAssembler INSTANCE = Mappers.getMapper(DtoAssembler.class);
@@ -277,7 +277,7 @@ public interface DtoAssembler { // 注意这里变成了一个接口，MapStruct
 
 **3、应该避免所谓的“通用”Repository模式**：很多 ORM 框架都提供一个“通用”的Repository接口，然后框架通过注解自动实现接口，比较典型的例子是Spring Data、Entity Framework等，这种框架的好处是在简单场景下很容易通过配置实现，但是坏处是基本上无扩展的可能性（比如加定制缓存逻辑），在未来有可能还是会被推翻重做。当然，这里避免通用不代表不能有基础接口和通用的帮助类，具体如下。 我们先定义一个基础的 Repository 基础接口类，以及一些Marker接口类：
 
-```
+```java
 public interface Repository<T extends Aggregate<ID>, ID extends Identifier> {
 
     /**
@@ -334,7 +334,7 @@ public interface Identifier extends Serializable {
 
 业务自己的接口只需要在基础接口上进行扩展，举个订单的例子：
 
-```
+```java
 // 代码在Domain层
 public interface OrderRepository extends Repository<Order, OrderId> {
 
@@ -362,7 +362,7 @@ public interface OrderRepository extends Repository<Order, OrderId> {
 
 先举个Repository的最简单实现的例子。注意OrderRepositoryImpl在Infrastructure层：
 
-```
+```java
 // 代码在Infrastructure层
 @Repository // Spring的注解
 public class OrderRepositoryImpl implements OrderRepository {
@@ -436,7 +436,7 @@ public class OrderRepositoryImpl implements OrderRepository {
 
 如果用一个非常naive的实现来完成，会导致多出来两个无用的更新操作，如下：
 
-```
+```java
 public class OrderRepositoryImpl extends implements OrderRepository {
     private OrderDAO orderDAO;
     private LineItemDAO lineItemDAO;
@@ -495,7 +495,7 @@ Snapshot方案的好处是比较简单，成本在于每次保存时全量Diff�
 
 **DbRepositorySupport**
 
-```
+```java
 // 这个类是一个通用的支撑类，为了减少开发者的重复劳动。在用的时候需要继承这个类
 public abstract class DbRepositorySupport<T extends Aggregate<ID>, ID extends Identifier> implements Repository<T, ID> {
 
@@ -581,7 +581,7 @@ public abstract class DbRepositorySupport<T extends Aggregate<ID>, ID extends Id
 
 使用方只需要继承DbRepositorySupport：
 
-```
+```java
 public class OrderRepositoryImpl extends DbRepositorySupport<Order, OrderId> implements OrderRepository {
     private OrderDAO orderDAO;
     private LineItemDAO lineItemDAO;
@@ -625,7 +625,7 @@ public class OrderRepositoryImpl extends DbRepositorySupport<Order, OrderId> imp
 
 AggregateManager实现，主要是通过ThreadLocal避免多线程公用同一个Entity的情况
 
-```
+```java
 class ThreadLocalAggregateManager<T extends Aggregate<ID>, ID extends Identifier> implements AggregateManager<T, ID> {
 
     private ThreadLocal<DbContext<T, ID>> context;
@@ -722,7 +722,7 @@ class DbContext<T extends Aggregate<ID>, ID extends Identifier> {
 
 跑个单测（注意在这个case里我把Order和LineItem合并单表了）：
 
-```
+```java
 @Test
 public void multiInsert() {
     OrderDAO dao = new MockOrderDAO();
@@ -753,7 +753,7 @@ public void multiInsert() {
 
 单测结果：
 
-```
+```java
 第一次保存前
 Order(id=null, userId=11, lineItems=[LineItem(id=null, itemId=13, quantity=5, price=4), LineItem(id=null, itemId=14, quantity=2, price=3)], status=ENABLED)
 
