@@ -20,11 +20,23 @@ tags:
 
 * 作用：
   * 分布式服务SOA的注册中心主要提供服务调用的解析服务，指引服务调用方法（消费方）找到远处的服务提供者
+  
+    * Provider信息注册
+    * Consumer信息获取
+    * Broker集群的部署信息
+  
+    
+  
 * 问题
   * 问题一：存储什么数据？
     * 存储着Topic和Broker的关联信息，具体是不是呢？
   * 问题二：如果避免单点故障，提高高可用？？？
     * 相当于热备，部署多个互不通讯的NameServer，多个节点部署保证高可用
+  * **<font color='blue'>问题三：Broker是如何向NameServer注册信息的？？？</font>**
+    * 由于Broker是通过心跳机制，建立连接的，所以，即使是某个NameSrv不可用，在下次心跳的时候还是会把信息传递上去
+  * **<font color='blue'>问题四：系统是如何从NameServer获取消息的</font>**
+  * **<font color='blue'>问题五：Broker宕机了，NameServer是如何感知到的？</font>**
+  * **<font color='blue'>问题六：系统是如何感知到Broker宕机的？</font>**
 
 
 
@@ -36,11 +48,34 @@ tags:
 
 
 
+## 特征
+
+* NameServer 每30秒，检测一次 Broker 是否存活，如果检测到 Broker 宕机，则从路由表中将其移除；这是为了降低 NameServer 实现的复杂性，**<font color='red'>在消息发送端提供容错机制保证消息发送的高可用性</font>**。
+
+* NameServer 本身的高可用可**<font color='red'>通过部署多台 NameServer 服务器来实现，NameServer 服务器之间互不通信</font>**，也就是 NameServer 服务器之间在某一时刻的数据并不会完全相同，这对消息发送不会造成任何影响，这是 NameServer 设计的一个亮点，NameServer 设计追求简单高效。
+
+  <img src="../../../img/image-20211206103930227.png" alt="image-20211206103930227" style="zoom:50%;" />
+
+
+
+
+
 ## 启动流程 
 
 ### 时序图
 
 ![image-20210728160328983](/img/image-20210728160328983.png)
+
+
+
+### 步骤
+
+1. 解析命令行参数
+2. 解析配置文件
+3. 创建NamesrvConfig、NettyServerConfig配置对象
+4. 创建NameServerController的NameServer控制器
+5. 启动控制器
+6. **<font color='red'>注册系统shutDown钩子，释放系统资源</font>**
 
 
 
@@ -114,6 +149,7 @@ tags:
      //1. 创建NamesrvConfig配置文件
      final NamesrvConfig namesrvConfig = new NamesrvConfig();
      final NettyServerConfig nettyServerConfig = new NettyServerConfig();
+     //1.2 绑定端口
      nettyServerConfig.setListenPort(9876);
    
      //配置文件的目录地址
@@ -124,6 +160,7 @@ tags:
          properties = new Properties();
          properties.load(in);
          
+         //命令行语句对象化
          //此工具类，将namesrvConfig中的基本类型，使用properties进行注入
          MixAll.properties2Object(properties, namesrvConfig);
          MixAll.properties2Object(properties, nettyServerConfig);
@@ -142,6 +179,7 @@ tags:
        System.exit(0);
      }
    
+     //命令行属性，对象化
      MixAll.properties2Object(ServerUtil.commandLine2Properties(commandLine), namesrvConfig);
    
      if (null == namesrvConfig.getRocketmqHome()) {
@@ -156,13 +194,14 @@ tags:
      configurator.doConfigure(namesrvConfig.getRocketmqHome() + "/conf/logback_namesrv.xml");
    
      log = InternalLoggerFactory.getLogger(LoggerName.NAMESRV_LOGGER_NAME);
-   
+     //打印配置属性
      MixAll.printObjectProperties(log, namesrvConfig);
      MixAll.printObjectProperties(log, nettyServerConfig);
    
      final NamesrvController controller = new NamesrvController(namesrvConfig, nettyServerConfig);
    
-     // remember all configs to prevent discard
+     
+     // 注册配置文件和命令行配置和默认配置，注册到所有属性的配置文件中
      controller.getConfiguration().registerConfig(properties);
    
      return controller;
@@ -196,6 +235,7 @@ tags:
        }
      }));
    
+     //NameServer真正启动
      controller.start();
    
      return controller;
@@ -352,6 +392,16 @@ tags:
   }  
   ```
 
+  ```txt
+  RocketMQ 基于订阅发布机制， 一个 Topic 拥有多个消息队列 ，一 个Broker 为每一主题默认创建4个读队列 和 4个写队列。多个 Broker 组成一个集群， BrokerName 由相同的多台 Broker 组成 Master-Slave 架构， brokerId 为 0 代表 Master， 大于 0 表示 Slave 。BrokerLivelnfo 中的 lastUpdateTimestamp 存储上次收到 Broker 心跳包的时间。
+  ```
+
+<img src="../../../img/2.png" alt="img" style="zoom:67%;" />
+
+
+
+
+
 * QueueData：Topic队列数据
 
   <img src="/img/image-20210728163242184.png" alt="image-20210728163242184" style="zoom:50%;" />
@@ -421,20 +471,26 @@ tags:
   }  
   ```
 
-  
+
+
+
+
 
 ### 路由注册
 
-* 过程
+* 原理
 
-  * 启动，Broker发送心跳包给NameSrv
+  * 启动时
+    * Broker发送心跳包给NameSrv
   * 运行中
-    * Broker每隔60s发送一次
-    * NameSrv检测brokerLiveTable，长时间未收到心跳包，则删除信息，关闭socket
+    * Broker每隔向**<font color='red'>30s</font>**群中所有NameServer发送心跳包
+    * NameSrv收到心跳包会更新brokerLiveTable缓存中**<font color='red'>lastUpdateTimestamp</font>**，然后每隔**<font color='red'>10s</font>**扫描brokerLiveTable，如果连续**<font color='red'>120s</font>**没有收到心跳包，NameServer将移除该Broker的路由信息同时关闭Socket连接
 
 * 时序图
 
   ![RocketMQ--NameSrv--路由注册](/img/RocketMQ--NameSrv--路由注册.jpg)
+
+  
 
 #### Broker发送心跳包
 
@@ -443,6 +499,7 @@ tags:
 * BrokerController#start
 
   ```java
+  //Broker 定时向 NameServer 注册信息，范围：10秒~60秒，默认 30秒注册一次
   this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
   
     @Override
@@ -479,6 +536,28 @@ tags:
     List<String> nameServerAddressList = this.remotingClient.getNameServerAddressList();
     if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
   
+      // 构建注册请求
+      //
+      /**
+  
+           RocketMQ 网络传输基于 Netty 具体网络实现细节本书不会过细去剖析，在这里介绍一下网络跟踪方法：
+           每一个请求，RocketMQ 都会定义一个 RequestCode，然后再服务端会对应相应的网络处理器(processor 包中)，只需整库搜索 RequestCode 即可找到相应的处理逻辑。
+  
+           发送心跳包具体逻辑，首先封装请求包头 Header
+           brokerAddr：broker 地址
+           brokerId：brokerId:0:Master;大于 0:Slave
+           brokerName: broker 名称
+           clusterName: 集群名称
+           haServerAddr：master地址，初次请求时该值为空，slave 向 NameServer 注册后返回。
+           requestBody:
+              filterServerList:消息过滤服务器列表。
+              topicConfigWrapper: 主题配置， opicConfigWrapper 内部封装的是 TopicConfigManager 中的 topicConfigTable，
+                  内部存储的是 Broker 启动时默认的一些Topic, MixAll.SELF_TEST_TOPIC、 MixAll.DEFAULT_TOPIC(AutoCreateTopicEnable=true)、
+                  MixAll.BENCHMARK_TOPIC、MixAll.OFFSET_MOVED_EVENT、 BrokerConfig#brokerClusterName、 BrokerConfig#brokerName。
+                  Broker 中 Topic 默认存储在${Rocket_Home}/store/confg/topic.json 中。
+           */
+  
+      
       //封装请求包头(Header)
       final RegisterBrokerRequestHeader requestHeader = new RegisterBrokerRequestHeader();
       requestHeader.setBrokerAddr(brokerAddr);//broker地址
@@ -506,7 +585,10 @@ tags:
               //内部为Netty的发送方式，发送的协议对象为RemotingCommand
               //每个RemotingCommand会有一个Code，用来说明此消息是什么类型，让消费端使用
               //特定的处理器来处理
+              //如果处理失败了就断开连接
               RegisterBrokerResult result = registerBroker(namesrvAddr,oneway, timeoutMills,requestHeader,body);
+              
+              //注册Broker和注册结果
               if (result != null) {
                 registerBrokerResultList.add(result);
               }
@@ -532,8 +614,60 @@ tags:
     return registerBrokerResultList;
   }
   ```
-
-  * 处理逻辑在NameServer中
+  
+  * **<font color='red'>异步转同步好处：可以让多个发送的操作，同时进行，还有一点，如果不是异步执行的话，那么每个请求都需要等待很长时间，结果就是这个方法肯定超时，不得不说，细节呀，学习一波</font>**
+  
+  * registerBroker逻辑
+  
+    1. 通过broker地址获取本地缓存的**<font color='red'>通道channel</font>**
+  
+       1. 如果channel不存在就创建，否则就拿到之前创建的缓存
+  
+    2. 执行远程调用
+  
+       1. 如果发生通道异常的情况，就关闭此次的通道，**<font color='red'>在下次心跳的时候，把信息传上去</font>**，如果是其他异常，打印日志信息，通道保持
+  
+          ```java
+          @Override
+              public RemotingCommand invokeSync(String addr, final RemotingCommand request, long timeoutMillis)
+                  throws InterruptedException, RemotingConnectException, RemotingSendRequestException, RemotingTimeoutException {
+                  long beginStartTime = System.currentTimeMillis();
+                  final Channel channel = this.getAndCreateChannel(addr);
+                  if (channel != null && channel.isActive()) {
+                      try {
+                        
+                          //前置钩子方法
+                          doBeforeRpcHooks(addr, request);
+                          long costTime = System.currentTimeMillis() - beginStartTime;
+                        
+                          //等待时间太久超时了
+                          if (timeoutMillis < costTime) {
+                              throw new RemotingTimeoutException("invokeSync call timeout");
+                          }
+                          RemotingCommand response = this.invokeSyncImpl(channel, request, timeoutMillis - costTime);
+                          //后置钩子方法
+                          doAfterRpcHooks(RemotingHelper.parseChannelRemoteAddr(channel), request, response);
+                          return response;
+                        
+                      //通道异常情况  
+                      } catch (RemotingSendRequestException e) {
+                          log.warn("invokeSync: send request exception, so close the channel[{}]", addr);
+                          this.closeChannel(addr, channel);
+                          throw e;
+                      } catch (RemotingTimeoutException e) {
+                          if (nettyClientConfig.isClientCloseSocketIfTimeout()) {
+                              this.closeChannel(addr, channel);
+                              log.warn("invokeSync: close socket because of timeout, {}ms, {}", timeoutMillis, addr);
+                          }
+                          log.warn("invokeSync: wait response timeout exception, the channel[{}]", addr);
+                          throw e;
+                      }
+                  } else {
+                      this.closeChannel(addr, channel);
+                      throw new RemotingConnectException(addr);
+                  }
+              }
+          ```
 
 
 
@@ -566,6 +700,7 @@ tags:
     }
   
   
+    
     switch (request.getCode()) {
       case RequestCode.PUT_KV_CONFIG:
         return this.putKVConfig(ctx, request);
@@ -631,6 +766,14 @@ tags:
 * registerBroker：注册的主要逻辑
 
   ```java
+  // NameServe 与 Broker 保持长连接，Broker 状态存储在 brokerLiveTable 中，
+  // NameServer 每收到一个心跳包，将更新 brokerLiveTable 中关于 Broker 的状态信息以及路由表（topicQueueTable、brokerAddrTable、 brokerLiveTable、 filterServerTable）。
+  // 更新上述路由表（HashTable）使用了锁粒度较少的读写锁，允许多个消息发送者（Producer）并发读配置信息，保证消息发送时的高并发。 但同一时刻 NameServer 只处理一个 Broker 心跳包，多个心跳包请求串行执行。
+  
+  // NameServer 接受 Broker 的注册心跳包
+  
+  // 路由注册需要加写锁，防止并发修改 RouteInfoManager 中的路由表。
+  // 首先判断Broker 所属集群是否存在，如果不存在，则创建，然后将broker名加入到集群broker集合中
   public RegisterBrokerResult registerBroker(
     final String clusterName,
     final String brokerAddr,
@@ -646,6 +789,7 @@ tags:
   
   
         //1. 加锁，防止并发修改路由表  clusterAddrTable
+        //Broker 所属集群是否存在， 如果不存在，则创建，然后将 broker 名加入到集群 Broker 集合中。
         this.lock.writeLock().lockInterruptibly();
   
         //1.1 首先判断Broker所属集群是否存在，如果不存在，则创建，然后将broker加入到集群中
@@ -658,9 +802,13 @@ tags:
   
   
   
-        //2. 维护BrokerData的信息
+        //2. 维护BrokerData的信息,首先从 brokerAddrTable 根据 BrokerName 尝试获取 Broker 信息，
+        //// 如果不存在，则新建 BrokerData 并放入 brokerAddrTable 中， registerFirst 设置为 true，如果存在，直接替换原先的， registerFirst 设置 false ，表示非第一次注册
         boolean registerFirst = false;
+        
+        //集群信息
         BrokerData brokerData = this.brokerAddrTable.get(brokerName);
+        //集群信息不存在，创建broker放入集群中
         if (null == brokerData) {
           registerFirst = true;
           brokerData = new BrokerData(clusterName, brokerName, new HashMap<Long, String>());
@@ -884,6 +1032,137 @@ public void scanNotActiveBroker() {
 }
 ```
 
+* 此处，Namesrv存在单方面关闭通道，那么Broker如果需要发送信息的话，会发现通道关闭了，然后就会删除通道缓存，下次心跳的时候再上传Broker元信息
+
+```java
+public void onChannelDestroy(String remoteAddr, Channel channel) {
+    String brokerAddrFound = null;
+    if (channel != null) {
+        try {
+            try {
+                this.lock.readLock().lockInterruptibly();
+                Iterator<Entry<String, BrokerLiveInfo>> itBrokerLiveTable =
+                        this.brokerLiveTable.entrySet().iterator();
+                while (itBrokerLiveTable.hasNext()) {
+                    Entry<String, BrokerLiveInfo> entry = itBrokerLiveTable.next();
+                    if (entry.getValue().getChannel() == channel) {
+                        brokerAddrFound = entry.getKey();
+                        break;
+                    }
+                }
+            } finally {
+                this.lock.readLock().unlock();
+            }
+        } catch (Exception e) {
+            log.error("onChannelDestroy Exception", e);
+        }
+    }
+
+    if (null == brokerAddrFound) {
+        brokerAddrFound = remoteAddr;
+    } else {
+        log.info("the broker's channel destroyed, {}, clean it's data structure at once", brokerAddrFound);
+    }
+
+    if (brokerAddrFound != null && brokerAddrFound.length() > 0) {
+
+        try {
+            try {
+                // Step1：申请写锁，根据 brokerAddress 从 brokerLiveTable、filterServerTable移除
+                this.lock.writeLock().lockInterruptibly();
+                this.brokerLiveTable.remove(brokerAddrFound);
+                this.filterServerTable.remove(brokerAddrFound);
+
+                // Step2 ：维护 brokerAddrTable。 遍历从 HashMap<String /* brokerName */， BrokerData> brokerAddrTable，
+                // 从 BrokerData 的 HashMap<Long/* broker*/， String /* broker address */> brokerAddrs 中，找到具体的 Broker，
+                // 从 BrokerData 移除 ，如果移除后在 BrokerData 中不再包含其他 Broker ，则 brokerAddrTable 中移除该 brokerName 对应的条目
+                String brokerNameFound = null;
+                boolean removeBrokerName = false;
+                Iterator<Entry<String, BrokerData>> itBrokerAddrTable =
+                        this.brokerAddrTable.entrySet().iterator();
+                while (itBrokerAddrTable.hasNext() && (null == brokerNameFound)) {
+                    BrokerData brokerData = itBrokerAddrTable.next().getValue();
+
+                    Iterator<Entry<Long, String>> it = brokerData.getBrokerAddrs().entrySet().iterator();
+                    while (it.hasNext()) {
+                        Entry<Long, String> entry = it.next();
+                        Long brokerId = entry.getKey();
+                        String brokerAddr = entry.getValue();
+                        if (brokerAddr.equals(brokerAddrFound)) {
+                            brokerNameFound = brokerData.getBrokerName();
+                            it.remove();
+                            log.info("remove brokerAddr[{}, {}] from brokerAddrTable, because channel destroyed",
+                                    brokerId, brokerAddr);
+                            break;
+                        }
+                    }
+
+                    if (brokerData.getBrokerAddrs().isEmpty()) {
+                        removeBrokerName = true;
+                        itBrokerAddrTable.remove();
+                        log.info("remove brokerName[{}] from brokerAddrTable, because channel destroyed",
+                                brokerData.getBrokerName());
+                    }
+                }
+                // Step3:根据 BrokerName,从 clusterAddrTable 中找到 Broker 并从集群中移除。如果移除后，集群中不包含任何 Broker，则将该集群从 clusterAddrTable 中移除。
+                if (brokerNameFound != null && removeBrokerName) {
+                    Iterator<Entry<String, Set<String>>> it = this.clusterAddrTable.entrySet().iterator();
+                    while (it.hasNext()) {
+                        Entry<String, Set<String>> entry = it.next();
+                        String clusterName = entry.getKey();
+                        Set<String> brokerNames = entry.getValue();
+                        boolean removed = brokerNames.remove(brokerNameFound);
+                        if (removed) {
+                            log.info("remove brokerName[{}], clusterName[{}] from clusterAddrTable, because channel destroyed",
+                                    brokerNameFound, clusterName);
+
+                            if (brokerNames.isEmpty()) {
+                                log.info("remove the clusterName[{}] from clusterAddrTable, because channel destroyed and no broker in this cluster",
+                                        clusterName);
+                                it.remove();
+                            }
+
+                            break;
+                        }
+                    }
+                }
+                // Step4: 根据 brokerName，遍历所有主题的队列，如果队列中包含了当前 Broker 的队列，则移除，如果 topic 只包含待移除Broker 的队列的话，从路由表中删除该 topic
+                if (removeBrokerName) {
+                    Iterator<Entry<String, List<QueueData>>> itTopicQueueTable =
+                            this.topicQueueTable.entrySet().iterator();
+                    while (itTopicQueueTable.hasNext()) {
+                        Entry<String, List<QueueData>> entry = itTopicQueueTable.next();
+                        String topic = entry.getKey();
+                        List<QueueData> queueDataList = entry.getValue();
+
+                        Iterator<QueueData> itQueueData = queueDataList.iterator();
+                        while (itQueueData.hasNext()) {
+                            QueueData queueData = itQueueData.next();
+                            if (queueData.getBrokerName().equals(brokerNameFound)) {
+                                itQueueData.remove();
+                                log.info("remove topic[{} {}], from topicQueueTable, because channel destroyed",
+                                        topic, queueData);
+                            }
+                        }
+
+                        if (queueDataList.isEmpty()) {
+                            itTopicQueueTable.remove();
+                            log.info("remove topic[{}] all queue, from topicQueueTable, because channel destroyed",
+                                    topic);
+                        }
+                    }
+                }
+            } finally {
+                // step5：释放锁，完成路由删除
+                this.lock.writeLock().unlock();
+            }
+        } catch (Exception e) {
+            log.error("onChannelDestroy Exception", e);
+        }
+    }
+}
+```
+
 
 
 
@@ -892,7 +1171,7 @@ public void scanNotActiveBroker() {
 
 ### 路由发现
 
-* 路由发现是非实时的，当Topic路由出现变化后，NameServer不主动推送给客户端，而是由客户端定时拉取最新的路由
+* 路由发现是**<font color='red'>非实时</font>**的，当Topic路由出现变化后，NameServer**<font color='red'>不主动推送给客户端，而是由客户端定时拉取最新的路由</font>**
 
 * 路由结果对象
 
@@ -933,7 +1212,7 @@ public void scanNotActiveBroker() {
 
 * Netty请求的统一入口
 
-##### processRequest
+##### processRequest：客户端请求Namesrv统一入口
 
 ```java
 @Override
@@ -1024,7 +1303,6 @@ public RemotingCommand getRouteInfoByTopic(ChannelHandlerContext ctx,
 
 
   //2. 如果找到主题对应的路由信息并且该主题为顺序消息，则从 NameServer KVconfig 中获取关于顺序消息相 的配置填充路由信息
-  //如果找不到路由信息 CODE 则使用 TOPIC NOT_EXISTS ，表示没有找到对应的路由
   if (topicRouteData != null) {
     if (this.namesrvController.getNamesrvConfig().isOrderMessageEnable()) {
       String orderTopicConf =
@@ -1040,6 +1318,7 @@ public RemotingCommand getRouteInfoByTopic(ChannelHandlerContext ctx,
     return response;
   }
 
+  //如果找不到路由信息 CODE 则使用 TOPIC NOT_EXISTS ，表示没有找到对应的路由
   response.setCode(ResponseCode.TOPIC_NOT_EXIST);
   response.setRemark("No topic route info in name server for the topic: " + requestHeader.getTopic()
                      + FAQUrl.suggestTodo(FAQUrl.APPLY_TOPIC_URL));
@@ -1113,3 +1392,10 @@ public static String properties2String(final Properties properties) {
 }
 ```
 
+
+
+
+
+#### 参考文档
+
+* https://www.jianshu.com/p/2e4d8a6fa843
