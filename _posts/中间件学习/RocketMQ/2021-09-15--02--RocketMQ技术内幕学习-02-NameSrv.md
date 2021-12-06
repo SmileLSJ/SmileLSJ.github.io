@@ -36,7 +36,7 @@ tags:
 
 
 
-## 启动流程
+## 启动流程 
 
 ### 时序图
 
@@ -434,7 +434,7 @@ tags:
 
 * 时序图
 
-  ![RocketMQ--NameSrv--路由注册](/../VPProjects/RocketMQ--NameSrv--路由注册.jpg)
+  ![RocketMQ--NameSrv--路由注册](/img/RocketMQ--NameSrv--路由注册.jpg)
 
 #### Broker发送心跳包
 
