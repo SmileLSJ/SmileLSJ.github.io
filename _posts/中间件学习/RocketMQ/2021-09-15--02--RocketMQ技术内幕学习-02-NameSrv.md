@@ -30,13 +30,36 @@ tags:
 * 问题
   * 问题一：存储什么数据？
     * 存储着Topic和Broker的关联信息，具体是不是呢？
+    
   * 问题二：如果避免单点故障，提高高可用？？？
     * 相当于热备，部署多个互不通讯的NameServer，多个节点部署保证高可用
+    
   * **<font color='blue'>问题三：Broker是如何向NameServer注册信息的？？？</font>**
-    * 由于Broker是通过心跳机制，建立连接的，所以，即使是某个NameSrv不可用，在下次心跳的时候还是会把信息传递上去
+  
+    * **每个Broker都会向每个NameServer进行服务注册**，由于Broker是通过心跳机制，建立连接的，所以，即使是某个NameSrv不可用，在下次心跳的时候还是会把信息传递上去
+  
   * **<font color='blue'>问题四：系统是如何从NameServer获取消息的</font>**
+  
+    * 客户端主动拉取信息
+  
   * **<font color='blue'>问题五：Broker宕机了，NameServer是如何感知到的？</font>**
+  
+    * Broker会每隔**30s**向每一个NameServer发送心跳请求，证明自己还活着。而NameServer再接收到心跳请求后，就会记录下这台Broker发送心跳请求的时间。
+    * 然后，NameServer自己每**10s**会扫描一次所有Broker留下的心跳请求时间，如果发现哪台Broker留下来的心跳请求时间距离当前时间超过**120s**了，那么就会断定这台Broker已经挂掉了，就会更新自己的Broker列表信息。
+  
   * **<font color='blue'>问题六：系统是如何感知到Broker宕机的？</font>**
+  
+    * 刚才我们知道了Broker宕机后，NameServer是可以感知到的，但生产者和消费者系统如果不能感知到宕机的信息，问题还是不能解决的，那么系统是如何感知到Broker宕机的呢？难道只要有Broker宕机了，NameServer就要主动发送消息给各个系统吗？
+  
+      这是不靠谱的，就算是NameServer主动发送消息给所有系统，也无法解决问题。
+  
+      我们想一下，如果这时候Broker宕机了，但是同时生产者已经把消息发出来给这台宕机的Broker了，而这个时候NameServer经过心跳检测刚刚感知到这个情况，再去主动发送给这个生产者，这样当然不能解决问题，报错已经发生了。
+  
+      再想一下，NameServer就算是不主动发送消息给生产者，上边我们已经了解每个系统间隔一段时间就会主动向NameServer拉取信息了，所以NameServer主动发送消息既不能保证实时性，又是一个多此一举的过程。
+  
+      
+  
+      那么实际解决方案是什么呢？**<font color='red'>交给生产者来自己解决</font>**
 
 
 
