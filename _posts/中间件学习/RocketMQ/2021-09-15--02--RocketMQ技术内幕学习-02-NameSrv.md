@@ -77,9 +77,24 @@ tags:
 
 * NameServer 本身的高可用可**<font color='red'>通过部署多台 NameServer 服务器来实现，NameServer 服务器之间互不通信</font>**，也就是 NameServer 服务器之间在某一时刻的数据并不会完全相同，这对消息发送不会造成任何影响，这是 NameServer 设计的一个亮点，NameServer 设计追求简单高效。
 
-  <img src="../../../img/image-20211206103930227.png" alt="image-20211206103930227" style="zoom:50%;" />
+  <img src="/img/image-20211206103930227.png" alt="image-20211206103930227" style="zoom:50%;" />
 
 
+
+## NameServer结构
+
+* 整个NameServer的核心就是一个**<font color='red'>NamesrvController对象</font>**。这个controller对象就跟java Web开发中的Controller功能类似，都是响应客户端请求的。
+* 在创建NamesrvController对象时，有两个关键的配置文件
+  * NamesrvConfig这个是NameServer自己运行需要的配置信息
+  * NettyServerConfig包含Netty服务端的配置参数，固定的占用了9876端口。比较有意思的是这个9876端口并没有提供覆盖的方法
+* 然后在启动服务时，启动了一个RemotingServer。这个就是用来响应请求的。
+* 在关闭服务时，关闭了四个东西
+  * remotingServer，响应请求的服务；
+  * remotingExecutor Netty服务线程池; 
+  * scheduledExecutorService 定时任务;
+  * fileWatchService 这个是用来跟踪acl配置的(acl的配置文件是实时热加载的)。
+
+![https://note.youdao.com/yws/public/resource/ca36df22924e8930a550116b530b7ca5/xmlnote/DB56C28B4ADB409B939F0FC0B5A1DA77/41491](/img/41491.png)
 
 
 
@@ -513,6 +528,10 @@ tags:
 
   ![RocketMQ--NameSrv--路由注册](/img/RocketMQ--NameSrv--路由注册.jpg)
 
+* 整体结构图
+
+  ![https://note.youdao.com/yws/public/resource/ca36df22924e8930a550116b530b7ca5/xmlnote/02CF463C6E054DACB025EDD8FA842E64/41482](/img/41482.png)
+
   
 
 #### Broker发送心跳包
@@ -534,9 +553,62 @@ tags:
       }
     }
   }, 1000 * 10, Math.max(10000, Math.min(brokerConfig.getRegisterNameServerPeriod(), 60000)), TimeUnit.MILLISECONDS);
+  
+  
+  public synchronized void registerBrokerAll(final boolean checkOrderConfig, boolean oneway, boolean forceRegister) {
+    TopicConfigSerializeWrapper topicConfigWrapper = this.getTopicConfigManager().buildTopicConfigSerializeWrapper();
+    
+    //.....一些非主流程的代码.....
+  
+    //这里才是比较关键的地方，先判断是否需要注册，然后调用doRegisterBrokerAll方法真正去注册
+    if (forceRegister || needRegister(this.brokerConfig.getBrokerClusterName(),
+                                      this.getBrokerAddr(),
+                                      this.brokerConfig.getBrokerName(),
+                                      this.brokerConfig.getBrokerId(),
+                                      this.brokerConfig.getRegisterBrokerTimeoutMills())) {
+      doRegisterBrokerAll(checkOrderConfig, oneway, topicConfigWrapper);
+    }
+  }
+  
+  
+  private void doRegisterBrokerAll(boolean checkOrderConfig, boolean oneway,
+          TopicConfigSerializeWrapper topicConfigWrapper) {
+  
+    //为什么返回的是个List？？？
+    //  这就是因为Broker是向所有NameServer进行注册
+    List<RegisterBrokerResult> registerBrokerResultList = this.brokerOuterAPI.registerBrokerAll(
+      this.brokerConfig.getBrokerClusterName(),
+      this.getBrokerAddr(),
+      this.brokerConfig.getBrokerName(),
+      this.brokerConfig.getBrokerId(),
+      this.getHAServerAddr(),
+      topicConfigWrapper,
+      this.filterServerManager.buildNewFilterServerList(),
+      oneway,
+      this.brokerConfig.getRegisterBrokerTimeoutMills(),
+      this.brokerConfig.isCompressedRegister());
+  
+    //如果注册结果的数量大于0，那么就对结果进行处理，只有有一个成功，就认为注册成功
+    // 说明了 Broker认为NameServer是无状态的，认为每个数据都是一致的，只要一个成功，就认为所有都成功
+    if (registerBrokerResultList.size() > 0) {
+      RegisterBrokerResult registerBrokerResult = registerBrokerResultList.get(0);
+      if (registerBrokerResult != null) {
+  
+        //主节点地址
+        if (this.updateMasterHAServerAddrPeriodically && registerBrokerResult.getHaServerAddr() != null) {
+          this.messageStore.updateHaMasterAddress(registerBrokerResult.getHaServerAddr());
+        }
+  
+        //从节点地址
+        this.slaveSynchronize.setMasterAddr(registerBrokerResult.getMasterAddr());
+  
+        if (checkOrderConfig) {
+          this.getTopicConfigManager().updateOrderTopicConfig(registerBrokerResult.getKvTable());
+        }
+      }
+    }
+  }
   ```
-
-
 
 ##### BrokerOuterAPI
 
